@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ZHIPU_API_KEY=${ZHIPU_API_KEY}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - OCR_CONCURRENCY=3
+      - MAX_PDF_SIZE=50MB
+      - CHUNK_SIZE=500
+      - CHUNK_OVERLAP=50
+    volumes:
+      - ./backend/chroma_db:/app/chroma_db
+      - ./backend/uploads:/app/uploads
+      - ./backend/thumbnails:/app/thumbnails
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  chroma_db:
+  uploads:
+  thumbnails:

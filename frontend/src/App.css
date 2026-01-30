@@ -1,0 +1,430 @@
+/* CSS Variables - 专业扁平化配色 */
+:root {
+  --primary-color: #2563eb;
+  --primary-dark: #1e40af;
+  --primary-light: #3b82f6;
+  --accent-color: #0891b2;
+
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8fafc;
+  --bg-tertiary: #f1f5f9;
+  --bg-hover: #e2e8f0;
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-tertiary: #94a3b8;
+
+  --border-color: #e2e8f0;
+  --border-dark: #cbd5e1;
+
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+
+  --error-color: #dc2626;
+  --success-color: #16a34a;
+  --warning-color: #f59e0b;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+/* Reset */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* App Layout */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Header */
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  height: 60px;
+  background: var(--primary-color);
+  color: white;
+  box-shadow: var(--shadow-md);
+  z-index: 100;
+  border-bottom: 1px solid var(--primary-dark);
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-left h1 {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.version {
+  padding: 4px 12px;
+  background: var(--primary-dark);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-btn {
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: var(--radius-md);
+  background: white;
+  color: var(--primary-color);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.header-btn:hover {
+  background: var(--bg-secondary);
+  border-color: white;
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+.close-doc-btn {
+  background: white;
+  color: var(--error-color);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.close-doc-btn:hover {
+  background: #fef2f2;
+  border-color: white;
+}
+
+/* Main Content */
+.app-main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.pdf-section {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  min-width: 0;
+  transition: background 0.2s ease;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.pdf-section .pdf-viewer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.pdf-scroll-container {
+  flex: 1;
+  overflow: auto;
+  height: 0;
+  /* 关键: 让flex: 1生效 */
+}
+
+.pdf-section.dragging {
+  background: #dbeafe;
+  border: 2px dashed var(--primary-color);
+}
+
+.chat-section {
+  flex: 1;
+  min-width: 250px;
+  background: var(--bg-primary);
+  border-left: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Resizable Splitter */
+.resizer {
+  width: 6px;
+  background: var(--border-color);
+  cursor: col-resize;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+
+.resizer:hover,
+.resizer.resizing {
+  background: var(--primary-color);
+}
+
+.resizer-handle {
+  width: 2px;
+  height: 40px;
+  background: var(--text-tertiary);
+  border-radius: 2px;
+  transition: background 0.2s;
+}
+
+.resizer:hover .resizer-handle,
+.resizer.resizing .resizer-handle {
+  background: white;
+}
+
+/* Upload Area */
+.upload-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  text-align: center;
+}
+
+.upload-icon {
+  font-size: 80px;
+  margin-bottom: 24px;
+  animation: float 3s ease-in-out infinite;
+}
+
+@keyframes float {
+
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.upload-area h2 {
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.upload-area p {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 32px;
+}
+
+.upload-btn {
+  display: inline-block;
+  padding: 14px 32px;
+  background: var(--primary-color);
+  color: white;
+  font-size: 16px;
+  font-weight: 600;
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: var(--shadow-lg);
+  border: none;
+}
+
+.upload-btn:hover {
+  background: var(--primary-dark);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-xl);
+}
+
+/* 全局进度覆盖层 */
+.process-overlay {
+  position: absolute;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  pointer-events: none;
+  /* 不阻挡下方交互 */
+  animation: slideDown 0.3s ease;
+}
+
+@keyframes slideDown {
+  from {
+    transform: translate(-50%, -20px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translate(-50%, 0);
+    opacity: 1;
+  }
+}
+
+.process-card {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(8px);
+  padding: 1rem 1.5rem;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  border: 1px solid var(--border-color);
+  min-width: 300px;
+}
+
+.process-info h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.process-info p {
+  margin: 0.2rem 0 0 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.progress-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid rgba(37, 99, 235, 0.1);
+  border-top-color: var(--primary-color);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 修复PDF黑块和滚动问题 */
+.pdf-section canvas {
+  background-color: white;
+  /* 强制白底，防止透明导致的黑底 */
+  display: block;
+  /* 防止inline-block导致的间隙 */
+}
+
+/* 确保高亮层不阻挡交互 */
+.highlight-layer {
+  pointer-events: none !important;
+}
+
+/* 确保页面容器正确 */
+.page-wrapper {
+  position: relative;
+  background-color: white;
+  margin-bottom: 1rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+  /* 防止溢出 */
+}
+
+/* Responsive */
+@media (max-width: 1024px) {
+  .chat-section {
+    width: 350px;
+    min-width: 280px;
+  }
+}
+
+@media (max-width: 768px) {
+  .app-main {
+    flex-direction: column;
+  }
+
+  .pdf-section {
+    flex: 1;
+    min-height: 50vh;
+  }
+
+  .chat-section {
+    width: 100%;
+    max-width: none;
+    height: 50vh;
+    border-left: none;
+    border-top: 1px solid var(--border-color);
+  }
+
+  .app-header {
+    padding: 0 16px;
+  }
+
+  .header-left h1 {
+    font-size: 16px;
+  }
+
+  .version {
+    display: none;
+  }
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+
+/* 强制隐藏 PDF.js 可能生成的辅助 Canvas */
+.hiddenCanvasElement {
+  display: none !important;
+  position: absolute !important;
+  top: -9999px !important;
+  left: -9999px !important;
+  width: 0 !important;
+  height: 0 !important;
+  pointer-events: none !important;
+  opacity: 0 !important;
+  z-index: -1 !important;
+}
+
+/* 选中文本样式 */
+::selection {
+  background: #bfdbfe;
+  color: var(--text-primary);
+}
