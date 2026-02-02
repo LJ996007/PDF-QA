@@ -5,6 +5,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import os
+import sys
+import io
+
+# 强制设置 stdout/stderr 为 UTF-8 编码（解决 Windows GBK 编码问题）
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 from app.routers import documents, ocr, chat
 
@@ -32,7 +39,15 @@ app = FastAPI(
 # CORS配置
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:5173", "http://127.0.0.1:5173",
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "http://localhost:3001", "http://127.0.0.1:3001",
+        "http://localhost:3002", "http://127.0.0.1:3002",
+        "http://localhost:3003", "http://127.0.0.1:3003",
+        "http://localhost:3004", "http://127.0.0.1:3004",
+        "http://localhost:3005", "http://127.0.0.1:3005",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
+import type { PromptTemplate } from '../constants/prompts';
+import { createExamplePrompts } from '../constants/prompts';
 
 /**
  * 边界框类型（PDF坐标）
@@ -61,6 +63,9 @@ export interface AppConfig {
     baiduOcrToken: string;  // 百度PP-OCR Token
     theme: 'light' | 'dark';
     pdfScale: number;
+    // 提示词相关
+    selectedPromptId: string;      // 当前选中的提示词ID
+    customPrompts: PromptTemplate[]; // 用户自定义提示词列表
 }
 
 /**
@@ -103,6 +108,70 @@ interface DocumentState {
     updateConfig: (config: Partial<AppConfig>) => void;
 }
 
+// 初始化配置（首次启动或兼容旧数据）
+const initializeConfig = (): AppConfig => {
+    const stored = localStorage.getItem('pdf-qa-storage');
+
+    if (!stored) {
+        // 首次启动，创建示例提示词
+        const examplePrompts = createExamplePrompts();
+        return {
+            zhipuApiKey: '',
+            deepseekApiKey: '',
+            ocrModel: 'glm-4v-flash',
+            ocrProvider: 'baidu',
+            baiduOcrUrl: '',
+            baiduOcrToken: '',
+            theme: 'light',
+            pdfScale: 1.0,
+            selectedPromptId: examplePrompts[0].id,
+            customPrompts: examplePrompts,
+        };
+    }
+
+    try {
+        const parsed = JSON.parse(stored);
+        const config = parsed.state?.config || parsed.config;
+
+        // 兼容旧版本：移除 isBuiltin 字段
+        if (config?.customPrompts) {
+            config.customPrompts = config.customPrompts.map((p: any) => ({
+                id: p.id,
+                name: p.name,
+                description: p.description,
+                content: p.content,
+                createdAt: p.createdAt ? new Date(p.createdAt) : new Date(),
+                updatedAt: p.updatedAt ? new Date(p.updatedAt) : new Date(),
+            }));
+        }
+
+        // 如果没有提示词，初始化为示例
+        if (!config?.customPrompts || config.customPrompts.length === 0) {
+            const examplePrompts = createExamplePrompts();
+            config.customPrompts = examplePrompts;
+            config.selectedPromptId = examplePrompts[0].id;
+        }
+
+        return config;
+    } catch (error) {
+        console.error('Failed to parse stored config:', error);
+        // 解析失败，返回默认配置
+        const examplePrompts = createExamplePrompts();
+        return {
+            zhipuApiKey: '',
+            deepseekApiKey: '',
+            ocrModel: 'glm-4v-flash',
+            ocrProvider: 'baidu',
+            baiduOcrUrl: '',
+            baiduOcrToken: '',
+            theme: 'light',
+            pdfScale: 1.0,
+            selectedPromptId: examplePrompts[0].id,
+            customPrompts: examplePrompts,
+        };
+    }
+};
+
 export const useDocumentStore = create<DocumentState>()(
     persist(
         immer((set) => ({
@@ -114,16 +183,7 @@ export const useDocumentStore = create<DocumentState>()(
             highlights: [],
             messages: [],
             isLoading: false,
-            config: {
-                zhipuApiKey: '',
-                deepseekApiKey: '',
-                ocrModel: 'glm-4v-flash',
-                ocrProvider: 'baidu',  // 默认使用百度PP-OCR（PaddleOCR），坐标更精确
-                baiduOcrUrl: '',
-                baiduOcrToken: '',
-                theme: 'light',
-                pdfScale: 1.0,
-            },
+            config: initializeConfig(),
 
             // 文档操作
             setDocument: (doc, pdfUrl) => set((state) => {
