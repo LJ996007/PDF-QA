@@ -5,7 +5,7 @@ import os
 import uuid
 import asyncio
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
@@ -65,15 +65,12 @@ async def process_document_async(
         
         if ocr_count > 0:
             # 检查是否有可用的OCR凭证
-            has_zhipu_key = bool(api_key)
             has_baidu_key = bool(baidu_ocr_url and baidu_ocr_token)
             
-            logger.info(f"[DOC] OCR provider: {ocr_provider}, has_zhipu_key: {has_zhipu_key}, has_baidu_key: {has_baidu_key}")
+            logger.info(f"[DOC] OCR provider: {ocr_provider}, has_baidu_key: {has_baidu_key}")
             
-            if ocr_provider == "baidu" and not has_baidu_key:
+            if not has_baidu_key:
                 logger.warning(f"Document needs OCR but Baidu credentials not provided")
-            elif ocr_provider == "zhipu" and not has_zhipu_key:
-                logger.warning(f"Document needs OCR but Zhipu API Key not provided")
             else:
                 # 执行OCR
                 for idx, page in enumerate(ocr_pages):
@@ -102,28 +99,17 @@ async def process_document_async(
                                 pdf_height = height * 72 / 150
                                 print(f"[DEBUG] Calculated PDF size: {pdf_width:.1f}x{pdf_height:.1f} points")
                                 
-                                print(f"[DEBUG] Calling {ocr_provider} OCR for page {page.page_number}")
+                                print(f"[DEBUG] Calling Baidu OCR for page {page.page_number}")
                                 
-                                if ocr_provider == "baidu" and baidu_ocr_url and baidu_ocr_token:
-                                    # 使用百度PP-OCR
-                                    chunks = await baidu_ocr_gateway.process_image(
-                                        page.image_base64,
-                                        page.page_number,
-                                        pdf_width,
-                                        pdf_height,
-                                        api_url=baidu_ocr_url,
-                                        token=baidu_ocr_token
-                                    )
-                                else:
-                                    # 使用智谱GLM-4V
-                                    chunks = await ocr_gateway.process_image(
-                                        page.image_base64,
-                                        page.page_number,
-                                        pdf_width,
-                                        pdf_height,
-                                        api_key=api_key,
-                                        model=ocr_model
-                                    )
+                                # 使用百度PP-OCR
+                                chunks = await baidu_ocr_gateway.process_image(
+                                    page.image_base64,
+                                    page.page_number,
+                                    pdf_width,
+                                    pdf_height,
+                                    api_url=baidu_ocr_url,
+                                    token=baidu_ocr_token
+                                )
                                 print(f"[DEBUG] OCR returned {len(chunks)} chunks")
                                 
                                 # 更新页面内容
@@ -340,3 +326,33 @@ async def delete_document(doc_id: str):
         del document_progress[doc_id]
     
     return {"status": "deleted"}
+    return {"status": "deleted"}
+
+
+from pydantic import BaseModel
+
+class ComplianceRequest(BaseModel):
+    requirements: List[str]
+    api_key: Optional[str] = None
+
+@router.post("/{doc_id}/compliance")
+async def check_compliance(doc_id: str, request: ComplianceRequest):
+    """
+    技术合规性检查
+    """
+    from app.services.compliance_service import compliance_service
+    
+    if doc_id not in documents:
+        raise HTTPException(status_code=404, detail="文档不存在")
+        
+    try:
+        results = await compliance_service.verify_requirements(
+            doc_id, 
+            request.requirements, 
+            api_key=request.api_key
+        )
+        return results
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))

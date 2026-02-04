@@ -63,7 +63,7 @@ def extract_text_with_coordinates(page: fitz.Page) -> Tuple[str, List[BoundingBo
                 coordinates.append(BoundingBox(
                     page=0,  # 后续填充
                     x=line_bbox[0],
-                    y=page_height - line_bbox[3],  # 转换坐标系：PDF原点在左下角
+                    y=line_bbox[1],  # 保持Top-Left坐标系，与OCR和前端统一
                     w=line_bbox[2] - line_bbox[0],
                     h=line_bbox[3] - line_bbox[1]
                 ))

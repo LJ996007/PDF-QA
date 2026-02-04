@@ -4,7 +4,7 @@ LLM路由服务 - DeepSeek推理
 import httpx
 import os
 import json
-from typing import AsyncGenerator, List, Dict
+from typing import AsyncGenerator, List, Dict, Any
 
 from app.models.schemas import TextChunk
 
@@ -133,7 +133,7 @@ class LLMRouter:
                 "https://open.bigmodel.cn/api/paas/v4/chat/completions",
                 headers=headers,
                 json={
-                    "model": "glm-4-flash",
+                    "model": "glm-4.7",
                     "messages": messages,
                     "stream": True,
                     "max_tokens": 4096
@@ -164,6 +164,79 @@ class LLMRouter:
                                 }
                         except (json.JSONDecodeError, KeyError):
                             continue
+
+
+    async def chat_completion(
+        self, 
+        messages: List[Dict], 
+        api_key: str = None,
+        json_mode: bool = False
+    ) -> Any:
+        """非流式对话，支持JSON模式"""
+        
+        # 优先使用DeepSeek
+        deepseek_key = api_key or self.deepseek_api_key
+        zhipu_key = api_key or self.zhipu_api_key
+        
+        url = ""
+        headers = {}
+        payload = {}
+        
+        if deepseek_key:
+            url = "https://api.deepseek.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {deepseek_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "deepseek-chat",
+                "messages": messages,
+                "stream": False,
+                "max_tokens": 4096
+            }
+            if json_mode:
+                payload["response_format"] = {"type": "json_object"}
+                
+        elif zhipu_key:
+            url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {zhipu_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "glm-4.7",
+                "messages": messages,
+                "stream": False,
+                "max_tokens": 4096
+            }
+        else:
+             raise Exception("API Key not configured")
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                url,
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            
+            # Return object similar to OpenAI response to keep interface consistent
+            data = response.json()
+            
+            class Message:
+                def __init__(self, content):
+                    self.content = content
+            
+            class Choice:
+                def __init__(self, content):
+                    self.message = Message(content)
+            
+            class Response:
+                def __init__(self, content):
+                    self.choices = [Choice(content)]
+            
+            content = data["choices"][0]["message"]["content"]
+            return Response(content)
 
 
 # 全局实例

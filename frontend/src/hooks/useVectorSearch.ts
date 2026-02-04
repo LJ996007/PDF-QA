@@ -165,12 +165,8 @@ export function useVectorSearch() {
         if (config.zhipuApiKey) {
             formData.append('zhipu_api_key', config.zhipuApiKey);
         }
-        if (config.ocrModel) {
-            formData.append('ocr_model', config.ocrModel);
-        }
-
         // OCR提供商选择
-        formData.append('ocr_provider', config.ocrProvider || 'zhipu');
+        formData.append('ocr_provider', 'baidu');
 
         // 百度OCR配置
         if (config.baiduOcrUrl) {

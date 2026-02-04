@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { PDFViewer } from './components/PDFViewer';
 import { ChatPanel } from './components/Chat';
+import { CompliancePanel } from './components/Compliance/CompliancePanel';
 import { Settings } from './components/Settings';
 import { useDocumentStore } from './stores/documentStore';
 import { useVectorSearch } from './hooks/useVectorSearch';
@@ -14,6 +15,9 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+
+  // Tab状态
+  const [activeTab, setActiveTab] = useState<'chat' | 'compliance'>('chat');
 
   // 分隔条状态
   const [leftWidth, setLeftWidth] = useState(60); // 左侧宽度百分比
@@ -221,9 +225,26 @@ function App() {
           <div className="resizer-handle" />
         </div>
 
-        {/* 对话面板 */}
+        {/* 右侧面板 (对话/合规) */}
         <div className="chat-section" style={{ width: `${100 - leftWidth}%` }}>
-          <ChatPanel />
+          <div className="right-panel-tabs">
+            <button
+              className={`tab-btn ${activeTab === 'chat' ? 'active' : ''}`}
+              onClick={() => setActiveTab('chat')}
+            >
+              💬 智能问答
+            </button>
+            <button
+              className={`tab-btn ${activeTab === 'compliance' ? 'active' : ''}`}
+              onClick={() => setActiveTab('compliance')}
+            >
+              📋 技术合规检查
+            </button>
+          </div>
+
+          <div className="right-panel-content">
+            {activeTab === 'chat' ? <ChatPanel /> : <CompliancePanel />}
+          </div>
         </div>
       </main>
 

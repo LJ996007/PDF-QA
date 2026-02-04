@@ -11,3 +11,5 @@ pillow>=10.2.0
 numpy>=1.26.0
 openai>=1.10.0
 python-dotenv>=1.0.0
+rank_bm25>=0.2.2
+jieba>=0.42.1

@@ -9,7 +9,16 @@ from typing import List, Optional
 import httpx
 import json
 
+
 from app.models.schemas import TextChunk, PageContent, BoundingBox
+
+try:
+    from rank_bm25 import BM25Okapi
+    import jieba
+    HAS_BM25 = True
+except ImportError:
+    HAS_BM25 = False
+    print("Warning: rank_bm25 or jieba not found. Hybrid search disabled.")
 
 
 class RAGEngine:
@@ -24,7 +33,9 @@ class RAGEngine:
             name="documents_v3",  # 使用v3集合以确保全新的维度(2048)
             metadata={"hnsw:space": "cosine"}
         )
+
         self.zhipu_api_key = os.getenv("ZHIPU_API_KEY", "")
+        self.bm25_cache = {} # Cache for BM25 indices: {doc_id: {'model': bm25, 'ids': [], 'texts': []}}
     
     async def _get_embeddings(self, texts: List[str], api_key: Optional[str] = None) -> List[List[float]]:
         """
@@ -206,6 +217,9 @@ class RAGEngine:
         
         print(f"[RAG] Indexed {len(all_chunks)} chunks, first bbox: {all_metadatas[0] if all_metadatas else 'N/A'}")
         
+        # 失效缓存
+        self._invalidate_bm25_cache(doc_id)
+        
         return len(all_chunks)
     
     async def index_ocr_result(
@@ -256,6 +270,66 @@ class RAGEngine:
         
         return len(all_chunks)
     
+
+
+    def _tokenize(self, text: str) -> List[str]:
+        """使用jieba进行中文分词"""
+        if not HAS_BM25:
+            return text.split()
+        return list(jieba.cut_for_search(text))
+
+    def _ensure_bm25_index(self, doc_id: str):
+        """确保文档的BM25索引已构建"""
+        if not HAS_BM25:
+            return
+
+        if doc_id in self.bm25_cache:
+            return
+
+        print(f"[Hybrid] Building BM25 index for {doc_id}...")
+        # 1. 从ChromaDB获取文档所有分块
+        try:
+            results = self.collection.get(
+                where={"doc_id": doc_id},
+                include=["documents"]
+            )
+            
+            if not results or not results["documents"]:
+                print(f"[Hybrid] No documents found for {doc_id}")
+                self.bm25_cache[doc_id] = {
+                    "model": None,
+                    "ids": [],
+                    "texts": []
+                }
+                return
+
+            ids = results["ids"]
+            texts = results["documents"]
+            
+            # 2. 分词
+            tokenized_corpus = [self._tokenize(doc) for doc in texts]
+            
+            # 3. 构建索引
+            bm25 = BM25Okapi(tokenized_corpus)
+            
+            self.bm25_cache[doc_id] = {
+                "model": bm25,
+                "ids": ids,
+                "texts": texts
+            }
+            print(f"[Hybrid] BM25 index built for {doc_id}, chunks: {len(ids)}")
+            
+        except Exception as e:
+            print(f"[Hybrid] Index build failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _invalidate_bm25_cache(self, doc_id: str):
+        """失效BM25缓存"""
+        if doc_id in self.bm25_cache:
+            del self.bm25_cache[doc_id]
+            print(f"[Hybrid] Cache invalidated for {doc_id}")
+
     async def retrieve(
         self, 
         query: str, 
@@ -270,24 +344,84 @@ class RAGEngine:
         query_embedding = (await self._get_embeddings([query], api_key))[0]
         
         # 检索
-        results = self.collection.query(
+        # 混合检索实现 (RRF Fusion)
+        
+        # 1. 向量检索 (Vector Search)
+        k_vector = top_k * 2 #以此获取更多候选项
+        vector_results = self.collection.query(
             query_embeddings=[query_embedding],
             where={"doc_id": doc_id},
-            n_results=top_k
+            n_results=k_vector
         )
         
-        if not results["ids"] or not results["ids"][0]:
+        # 2. 关键词检索 (BM25 Search)
+        # 确保索引存在
+        self._ensure_bm25_index(doc_id)
+        
+        bm25_top_n = []
+        if HAS_BM25 and doc_id in self.bm25_cache:
+            cache = self.bm25_cache[doc_id]
+            bm25 = cache["model"]
+            doc_ids = cache["ids"]
+            
+            tokenized_query = self._tokenize(query)
+            # 获取所有分数
+            doc_scores = bm25.get_scores(tokenized_query)
+            
+            # 获取Top N的索引
+            # argsort是升序，所以取最后k个并反转
+            import numpy as np
+            top_indices = np.argsort(doc_scores)[-k_vector:][::-1]
+            
+            for idx in top_indices:
+                if doc_scores[idx] > 0: # 只保留有匹配项的结果
+                    bm25_top_n.append(doc_ids[idx])
+        
+        # 3. RRF融合 (Reciprocal Rank Fusion)
+        # Score = 1 / (k + rank)
+        rrf_k = 60
+        final_scores = {} # {chunk_id: score}
+        
+        # 处理向量结果
+        if vector_results["ids"] and vector_results["ids"][0]:
+            for rank, chunk_id in enumerate(vector_results["ids"][0]):
+                final_scores[chunk_id] = final_scores.get(chunk_id, 0) + (1 / (rrf_k + rank + 1))
+        
+        # 处理BM25结果
+        for rank, chunk_id in enumerate(bm25_top_n):
+             final_scores[chunk_id] = final_scores.get(chunk_id, 0) + (1 / (rrf_k + rank + 1))
+             
+        # 4. 排序并获取Chunk详情
+        # 按分数降序
+        sorted_ids = sorted(final_scores.keys(), key=lambda x: final_scores[x], reverse=True)[:top_k]
+        
+        if not sorted_ids:
             return []
+            
+        # 批量获取Chunk详情
+        # ChromaDB .get() 
+        final_chunks_data = self.collection.get(
+            ids=sorted_ids,
+            include=["documents", "metadatas"]
+        )
+        
+        # 构建返回对象，需要按sorted_ids的顺序
+        id_map = {id_: i for i, id_ in enumerate(final_chunks_data["ids"])}
         
         chunks = []
-        for i, chunk_id in enumerate(results["ids"][0]):
-            metadata = results["metadatas"][0][i]
+        for chunk_id in sorted_ids:
+            if chunk_id not in id_map:
+                continue
+                
+            idx = id_map[chunk_id]
+            metadata = final_chunks_data["metadatas"][idx]
+            content = final_chunks_data["documents"][idx]
             
             chunks.append(TextChunk(
                 id=chunk_id,
                 document_id=doc_id,
                 page_number=metadata["page"],
-                content=results["documents"][0][i],
+                content=content,
                 bbox=BoundingBox(
                     page=metadata["page"],
                     x=metadata["bbox_x"],
@@ -296,16 +430,17 @@ class RAGEngine:
                     h=metadata["bbox_h"]
                 ),
                 source_type=metadata["source"],
-                distance=results["distances"][0][i] if results.get("distances") else None,
-                ref_id=f"ref-{i+1}"
+                distance=0, # Hybrid search score makes distance confusing, setting to 0 or could set to 1/score
+                ref_id=f"ref-{len(chunks)+1}"
             ))
-        
+            
         return chunks
     
     def delete_document(self, doc_id: str):
         """删除文档的所有索引"""
         try:
             self.collection.delete(where={"doc_id": doc_id})
+            self._invalidate_bm25_cache(doc_id)
         except Exception:
             pass
 

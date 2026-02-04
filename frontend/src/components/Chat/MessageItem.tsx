@@ -8,6 +8,7 @@ interface MessageItemProps {
 
 export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
     const { setHighlights, setCurrentPage } = useDocumentStore();
+    const [isRefsExpanded, setIsRefsExpanded] = React.useState(false);
 
     // 处理引用点击
     const handleRefClick = (refId: string) => {
@@ -54,8 +55,16 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
                 {/* 引用列表 */}
                 {message.role === 'assistant' && message.references.length > 0 && !message.isStreaming && (
                     <div className="references-list">
-                        <p className="references-title">📚 引用来源：</p>
-                        {message.references.map((ref) => (
+                        <div
+                            className="references-title"
+                            onClick={() => setIsRefsExpanded(!isRefsExpanded)}
+                            style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+                        >
+                            <span>{isRefsExpanded ? '▼' : '▶'}</span>
+                            <span>📚 引用来源 ({message.references.length})</span>
+                        </div>
+
+                        {isRefsExpanded && message.references.map((ref) => (
                             <div
                                 key={ref.id}
                                 className="reference-item"

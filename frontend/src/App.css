@@ -55,6 +55,48 @@ body {
   overflow: hidden;
 }
 
+/* ... existing styles ... */
+
+/* Tab Styles */
+.right-panel-tabs {
+  display: flex;
+  border-bottom: 1px solid #ddd;
+  background: white;
+}
+
+.tab-btn {
+  flex: 1;
+  padding: 12px;
+  border: none;
+  background: transparent;
+  font-size: 15px;
+  font-weight: 500;
+  color: #666;
+  cursor: pointer;
+  transition: all 0.2s;
+  border-bottom: 2px solid transparent;
+}
+
+.tab-btn:hover {
+  background: #f8f9fa;
+  color: #333;
+}
+
+.tab-btn.active {
+  color: #1a73e8;
+  border-bottom: 2px solid #1a73e8;
+  background: #e8f0fe;
+}
+
+.right-panel-content {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+
 /* Header */
 .app-header {
   display: flex;

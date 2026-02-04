@@ -12,8 +12,7 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
 
     const [zhipuKey, setZhipuKey] = useState(config.zhipuApiKey);
     const [deepseekKey, setDeepseekKey] = useState(config.deepseekApiKey);
-    const [ocrModel, setOcrModel] = useState(config.ocrModel || 'glm-4v-flash');
-    const [ocrProvider, setOcrProvider] = useState<'zhipu' | 'baidu'>(config.ocrProvider || 'baidu');
+    const [ocrProvider] = useState<'baidu'>('baidu');
     const [baiduOcrUrl, setBaiduOcrUrl] = useState(config.baiduOcrUrl || '');
     const [baiduOcrToken, setBaiduOcrToken] = useState(config.baiduOcrToken || '');
 
@@ -24,8 +23,7 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
         updateConfig({
             zhipuApiKey: zhipuKey,
             deepseekApiKey: deepseekKey,
-            ocrModel: ocrModel,
-            ocrProvider: ocrProvider,
+            ocrProvider: 'baidu',
             baiduOcrUrl: baiduOcrUrl,
             baiduOcrToken: baiduOcrToken,
         });
@@ -112,64 +110,40 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
 
                         {isOcrExpanded && (
                             <div className="section-content">
-                                {/* OCR 提供商选择 */}
+                                {/* OCR 提供商说明 */}
                                 <div className="setting-group">
                                     <label className="setting-label">OCR 服务提供商</label>
                                     <div className="provider-selector">
-                                        <button
-                                            className={`provider-btn ${ocrProvider === 'zhipu' ? 'active' : ''}`}
-                                            onClick={() => setOcrProvider('zhipu')}
-                                        >
-                                            智谱 GLM-4V
-                                        </button>
-                                        <button
-                                            className={`provider-btn ${ocrProvider === 'baidu' ? 'active' : ''}`}
-                                            onClick={() => setOcrProvider('baidu')}
-                                        >
+                                        <button className="provider-btn active">
                                             百度 PP-OCR
                                         </button>
                                     </div>
+                                    <p className="setting-hint" style={{ marginTop: '8px' }}>
+                                        目前仅支持部署在AI Studio的PP-OCR服务
+                                    </p>
                                 </div>
 
-                                {/* 智谱OCR配置 */}
-                                {ocrProvider === 'zhipu' && (
-                                    <div className="setting-group">
-                                        <label className="setting-label">OCR模型名称</label>
-                                        <input
-                                            type="text"
-                                            className="setting-input"
-                                            value={ocrModel}
-                                            onChange={(e) => setOcrModel(e.target.value)}
-                                            placeholder="glm-4v-flash"
-                                        />
-                                    </div>
-                                )}
-
                                 {/* 百度OCR配置 */}
-                                {ocrProvider === 'baidu' && (
-                                    <>
-                                        <div className="setting-group">
-                                            <label className="setting-label">API地址</label>
-                                            <input
-                                                type="text"
-                                                className="setting-input"
-                                                value={baiduOcrUrl}
-                                                onChange={(e) => setBaiduOcrUrl(e.target.value)}
-                                                placeholder="https://xxx.aistudio-app.com/ocr"
-                                            />
-                                        </div>
-                                        <div className="setting-group">
-                                            <label className="setting-label">Token</label>
-                                            <input
-                                                type="password"
-                                                className="setting-input"
-                                                value={baiduOcrToken}
-                                                onChange={(e) => setBaiduOcrToken(e.target.value)}
-                                                placeholder="your-access-token"
-                                            />
-                                        </div>
-                                    </>
-                                )}
+                                <div className="setting-group">
+                                    <label className="setting-label">API地址</label>
+                                    <input
+                                        type="text"
+                                        className="setting-input"
+                                        value={baiduOcrUrl}
+                                        onChange={(e) => setBaiduOcrUrl(e.target.value)}
+                                        placeholder="https://xxx.aistudio-app.com/ocr"
+                                    />
+                                </div>
+                                <div className="setting-group">
+                                    <label className="setting-label">Token</label>
+                                    <input
+                                        type="password"
+                                        className="setting-input"
+                                        value={baiduOcrToken}
+                                        onChange={(e) => setBaiduOcrToken(e.target.value)}
+                                        placeholder="your-access-token"
+                                    />
+                                </div>
                             </div>
                         )}
                     </div>

@@ -27,6 +27,14 @@ export interface TextChunk {
     source: 'native' | 'ocr';
 }
 
+export interface ComplianceItem {
+    id: number;
+    requirement: string;
+    status: 'satisfied' | 'unsatisfied' | 'partial' | 'unknown' | 'error';
+    response: string;
+    references: TextChunk[];
+}
+
 /**
  * 文档信息
  */
@@ -55,18 +63,37 @@ export interface ChatMessage {
  * 应用配置
  */
 export interface AppConfig {
+    apiBaseUrl: string;
+    embeddingsProvider: 'zhipu' | 'ollama'; // 暂时只支持智谱
     zhipuApiKey: string;
+    baiduApiKey: string;
+    baiduSecretKey: string;
+    baiduOcrUrl: string;
+    baiduOcrToken: string;
+    ocrProvider: 'baidu';  // OCR提供商
     deepseekApiKey: string;
-    ocrModel: string;  // 智谱OCR模型名称，如 glm-4v-flash
-    ocrProvider: 'zhipu' | 'baidu';  // OCR提供商
-    baiduOcrUrl: string;  // 百度PP-OCR API地址
-    baiduOcrToken: string;  // 百度PP-OCR Token
     theme: 'light' | 'dark';
     pdfScale: number;
     // 提示词相关
     selectedPromptId: string;      // 当前选中的提示词ID
     customPrompts: PromptTemplate[]; // 用户自定义提示词列表
 }
+
+const DEFAULT_CONFIG: AppConfig = {
+    apiBaseUrl: 'http://localhost:8000',
+    embeddingsProvider: 'zhipu',
+    zhipuApiKey: '',
+    baiduApiKey: '',
+    baiduSecretKey: '',
+    baiduOcrUrl: '',
+    baiduOcrToken: '',
+    ocrProvider: 'baidu',
+    deepseekApiKey: '',
+    theme: 'light',
+    pdfScale: 1.0,
+    selectedPromptId: '', // Will be set by initializeConfig
+    customPrompts: [],    // Will be set by initializeConfig
+};
 
 /**
  * Store状态
@@ -116,9 +143,12 @@ const initializeConfig = (): AppConfig => {
         // 首次启动，创建示例提示词
         const examplePrompts = createExamplePrompts();
         return {
+            apiBaseUrl: 'http://localhost:8000',
+            embeddingsProvider: 'zhipu',
             zhipuApiKey: '',
             deepseekApiKey: '',
-            ocrModel: 'glm-4v-flash',
+            baiduApiKey: '',
+            baiduSecretKey: '',
             ocrProvider: 'baidu',
             baiduOcrUrl: '',
             baiduOcrToken: '',
@@ -133,8 +163,27 @@ const initializeConfig = (): AppConfig => {
         const parsed = JSON.parse(stored);
         const config = parsed.state?.config || parsed.config;
 
+        if (!config) {
+            const examplePrompts = createExamplePrompts();
+            return {
+                apiBaseUrl: 'http://localhost:8000',
+                embeddingsProvider: 'zhipu',
+                zhipuApiKey: '',
+                deepseekApiKey: '',
+                baiduApiKey: '',
+                baiduSecretKey: '',
+                ocrProvider: 'baidu',
+                baiduOcrUrl: '',
+                baiduOcrToken: '',
+                theme: 'light',
+                pdfScale: 1.0,
+                selectedPromptId: examplePrompts[0].id,
+                customPrompts: examplePrompts,
+            };
+        }
+
         // 兼容旧版本：移除 isBuiltin 字段
-        if (config?.customPrompts) {
+        if (config.customPrompts) {
             config.customPrompts = config.customPrompts.map((p: any) => ({
                 id: p.id,
                 name: p.name,
@@ -152,15 +201,19 @@ const initializeConfig = (): AppConfig => {
             config.selectedPromptId = examplePrompts[0].id;
         }
 
-        return config;
+        // 确保所有字段都存在（合并默认配置）
+        return { ...DEFAULT_CONFIG, ...config };
     } catch (error) {
         console.error('Failed to parse stored config:', error);
         // 解析失败，返回默认配置
         const examplePrompts = createExamplePrompts();
         return {
+            apiBaseUrl: 'http://localhost:8000',
+            embeddingsProvider: 'zhipu',
             zhipuApiKey: '',
             deepseekApiKey: '',
-            ocrModel: 'glm-4v-flash',
+            baiduApiKey: '',
+            baiduSecretKey: '',
             ocrProvider: 'baidu',
             baiduOcrUrl: '',
             baiduOcrToken: '',
