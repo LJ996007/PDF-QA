@@ -1,8 +1,8 @@
 """大模型调用服务 - 兼容OpenAI格式的API"""
 import re
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from openai import OpenAI
-from app.config import LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+from app import config
 
 
 class LLMService:
@@ -13,14 +13,16 @@ class LLMService:
 
     def __init__(self):
         """初始化大模型客户端"""
-        if not LLM_API_KEY:
+        api_key, api_base, model = config.get_llm_config()
+        if not api_key:
             raise ValueError("LLM_API_KEY 未配置，请检查.env文件")
 
         self.client = OpenAI(
-            api_key=LLM_API_KEY,
-            base_url=LLM_API_BASE
+            api_key=api_key,
+            base_url=api_base
         )
-        self.model = LLM_MODEL
+        self.model = model
+        self._config_signature: Tuple[str, str, str] = (api_key, api_base, model)
 
     def _build_prompt(self, question: str, context_paragraphs: List[Dict]) -> str:
         """
@@ -123,10 +125,7 @@ class LLMService:
             }
 
         except Exception as e:
-            return {
-                "answer": f"生成答案时出错: {str(e)}",
-                "references": []
-            }
+            raise RuntimeError(f"大模型调用失败: {str(e)}") from e
 
     def _extract_references(self, answer: str) -> List[str]:
         """
@@ -174,7 +173,9 @@ class LLMService:
                     "id": para["id"],
                     "page": para["page"],
                     "text": para["text"][:200] + "..." if len(para["text"]) > 200 else para["text"],
-                    "bbox": para["bbox"]
+                    "bbox": para["bbox"],
+                    "page_width": para.get("page_width"),
+                    "page_height": para.get("page_height")
                 })
 
         return references
@@ -187,6 +188,8 @@ _llm_service: Optional[LLMService] = None
 def get_llm_service() -> LLMService:
     """获取LLM服务实例（单例）"""
     global _llm_service
-    if _llm_service is None:
+    api_key, api_base, model = config.get_llm_config()
+    signature = (api_key, api_base, model)
+    if _llm_service is None or getattr(_llm_service, "_config_signature", None) != signature:
         _llm_service = LLMService()
     return _llm_service

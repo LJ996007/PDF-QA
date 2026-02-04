@@ -1,7 +1,7 @@
 """PDF解析服务 - 提取文本、切分段落、记录位置"""
 import os
 import fitz  # PyMuPDF
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import uuid
 from app.models.schemas import Paragraph
 
@@ -9,16 +9,17 @@ from app.models.schemas import Paragraph
 class PDFParser:
     """PDF解析器"""
 
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, document_id: Optional[str] = None):
         """
         初始化PDF解析器
 
         Args:
             file_path: PDF文件路径
+            document_id: 文档ID（可选）
         """
         self.file_path = file_path
         self.doc = fitz.open(file_path)
-        self.document_id = str(uuid.uuid4())[:8]
+        self.document_id = document_id or uuid.uuid4().hex[:8]
 
     def get_total_pages(self) -> int:
         """获取PDF总页数"""
@@ -36,6 +37,8 @@ class PDFParser:
 
         for page_num in range(len(self.doc)):
             page = self.doc[page_num]
+            page_width = float(page.rect.width)
+            page_height = float(page.rect.height)
             blocks = self._get_text_blocks(page)
 
             for block in blocks:
@@ -59,7 +62,9 @@ class PDFParser:
                         "y0": bbox[1],
                         "x1": bbox[2],
                         "y1": bbox[3]
-                    }
+                    },
+                    page_width=page_width,
+                    page_height=page_height
                 )
                 paragraphs.append(paragraph)
 

@@ -8,7 +8,13 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   isLoading: boolean;
   onSendMessage: (question: string) => void;
-  onReferenceClick: (refId: string, page: number, bbox: { x0: number; y0: number; x1: number; y1: number }) => void;
+  onReferenceClick: (
+    refId: string,
+    page: number,
+    bbox: { x0: number; y0: number; x1: number; y1: number },
+    pageWidth?: number,
+    pageHeight?: number,
+  ) => void;
 }
 
 export function ChatPanel({ documentId, messages, isLoading, onSendMessage, onReferenceClick }: ChatPanelProps) {

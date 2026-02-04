@@ -4,7 +4,13 @@ import type { ChatMessage } from '../types';
 
 interface MessageBubbleProps {
   message: ChatMessage;
-  onReferenceClick?: (refId: string, page: number, bbox: { x0: number; y0: number; x1: number; y1: number }) => void;
+  onReferenceClick?: (
+    refId: string,
+    page: number,
+    bbox: { x0: number; y0: number; x1: number; y1: number },
+    pageWidth?: number,
+    pageHeight?: number,
+  ) => void;
 }
 
 export function MessageBubble({ message, onReferenceClick }: MessageBubbleProps) {
@@ -39,12 +45,25 @@ export function MessageBubble({ message, onReferenceClick }: MessageBubbleProps)
             <button
               key={`ref-${refIndex}`}
               className="inline-flex items-center px-2 py-0.5 mx-1 text-xs font-medium bg-blue-100 text-blue-800 rounded hover:bg-blue-200 transition-colors cursor-pointer"
-              onClick={() => onReferenceClick?.(ref.id, ref.page, ref.bbox)}
+              onClick={() => onReferenceClick?.(ref.id, ref.page, ref.bbox, ref.page_width, ref.page_height)}
             >
               [{refIndex}]
             </button>
           );
+        } else {
+          // 找不到对应引用时保留原始标记
+          parts.push(
+            <span key={`ref-miss-${refIndex}`}>
+              {match[0]}
+            </span>
+          );
         }
+      } else {
+        parts.push(
+          <span key={`ref-miss-${refIndex}`}>
+            {match[0]}
+          </span>
+        );
       }
 
       lastIndex = match.index + match[0].length;
@@ -82,7 +101,7 @@ export function MessageBubble({ message, onReferenceClick }: MessageBubbleProps)
               <button
                 key={ref.id}
                 className="block text-xs text-left text-gray-600 hover:text-blue-600 hover:underline truncate"
-                onClick={() => onReferenceClick?.(ref.id, ref.page, ref.bbox)}
+                onClick={() => onReferenceClick?.(ref.id, ref.page, ref.bbox, ref.page_width, ref.page_height)}
               >
                 [{idx + 1}] 第{ref.page}页: {ref.text}
               </button>

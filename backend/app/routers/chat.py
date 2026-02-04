@@ -1,9 +1,10 @@
 """问答接口 - 智能问答"""
 from fastapi import APIRouter, HTTPException
-from app.models.schemas import AskRequest, AskResponse
+from app.models.schemas import AskRequest, AskResponse, LLMConfigRequest, LLMConfigResponse
 from app.services.vector_store import VectorStore
 from app.services.llm_service import get_llm_service
 from typing import List
+from app.config import get_llm_config, set_llm_config, identify_provider
 
 router = APIRouter()
 
@@ -96,3 +97,45 @@ async def search_paragraphs(request: AskRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"检索失败: {str(e)}")
+
+
+@router.get("/llm-config", response_model=LLMConfigResponse)
+async def get_llm_config_endpoint():
+    """获取当前大模型配置（不返回密钥）"""
+    api_key, api_base, model = get_llm_config()
+    provider, provider_name = identify_provider(api_base)
+    return LLMConfigResponse(
+        configured=bool(api_key),
+        provider=provider,
+        model=model,
+        api_base=api_base,
+        api_key_set=bool(api_key),
+        message=provider_name if api_key else "未配置大模型 API 密钥"
+    )
+
+
+@router.post("/llm-config", response_model=LLMConfigResponse)
+async def set_llm_config_endpoint(request: LLMConfigRequest):
+    """更新大模型配置（仅内存，不落盘）"""
+    api_key = request.api_key
+    api_base = request.api_base
+    model = request.model
+
+    # 仅更新传入字段，支持单项修改
+    set_llm_config(
+        api_key=api_key.strip() if isinstance(api_key, str) else None,
+        api_base=api_base.strip() if isinstance(api_base, str) else None,
+        model=model.strip() if isinstance(model, str) else None
+    )
+
+    api_key, api_base, model = get_llm_config()
+    provider, provider_name = identify_provider(api_base)
+
+    return LLMConfigResponse(
+        configured=bool(api_key),
+        provider=provider,
+        model=model,
+        api_base=api_base,
+        api_key_set=bool(api_key),
+        message=provider_name if api_key else "未配置大模型 API 密钥"
+    )

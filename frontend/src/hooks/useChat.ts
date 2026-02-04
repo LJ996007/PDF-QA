@@ -56,8 +56,8 @@ export function useChat() {
           } else if (response.status === 500) {
             const detail = response.data?.detail;
             if (detail && typeof detail === 'string') {
-              if (detail.includes('API key') || detail.includes('api_key')) {
-                errorMessage = '大模型 API 密钥未配置或无效，请设置 DASHSCOPE_API_KEY 或 OPENAI_API_KEY 环境变量';
+              if (detail.includes('API key') || detail.includes('api_key') || detail.includes('LLM_API_KEY')) {
+                errorMessage = '大模型 API 密钥未配置或无效，请设置 LLM_API_KEY 环境变量';
               } else if (detail.includes('rate') || detail.includes('quota')) {
                 errorMessage = 'API 配额已用完或请求频率过高，请稍后再试';
               } else {

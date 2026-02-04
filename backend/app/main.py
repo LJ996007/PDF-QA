@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import upload, chat
+from app.config import CORS_ORIGINS, CORS_ALLOW_CREDENTIALS
 
 # 加载 .env 文件
 load_dotenv()
@@ -18,8 +19,8 @@ app = FastAPI(
 # 配置CORS - 允许前端跨域访问
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 开发环境允许所有来源
-    allow_credentials=True,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=CORS_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -44,36 +45,26 @@ async def health():
 @app.get("/api/llm-status")
 async def llm_status():
     """检查大模型连接状态"""
-    from app.config import LLM_API_KEY, LLM_API_BASE, LLM_MODEL
+    from app.config import get_llm_config, identify_provider
+
+    api_key, api_base, model = get_llm_config()
 
     # 检查是否配置了 API 密钥
-    if not LLM_API_KEY:
+    if not api_key:
         return {
             "configured": False,
             "provider": "none",
-            "message": "未配置大模型 API 密钥。请在 .env 文件中设置 LLM_API_KEY"
+            "model": model,
+            "api_base": api_base,
+            "message": "未配置大模型 API 密钥。请在 .env 文件或前端设置中配置"
         }
 
-    # 检测使用的是哪个提供商
-    provider = "unknown"
-    provider_name = "已配置 API"
-
-    if "bigmodel" in LLM_API_BASE:
-        provider = "zhipu"
-        provider_name = "已配置智谱 AI (GLM-4)"
-    elif "deepseek" in LLM_API_BASE:
-        provider = "deepseek"
-        provider_name = "已配置 DeepSeek"
-    elif "dashscope" in LLM_API_BASE:
-        provider = "dashscope"
-        provider_name = "已配置通义千问 (DashScope)"
-    elif "openai" in LLM_API_BASE:
-        provider = "openai"
-        provider_name = "已配置 OpenAI API"
+    provider, provider_name = identify_provider(api_base)
 
     return {
         "configured": True,
         "provider": provider,
-        "model": LLM_MODEL,
+        "model": model,
+        "api_base": api_base,
         "message": provider_name
     }

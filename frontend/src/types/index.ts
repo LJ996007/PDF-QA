@@ -45,6 +45,8 @@ export interface Reference {
   page: number;
   text: string;
   bbox: BBox;
+  page_width?: number;
+  page_height?: number;
 }
 
 /** 问答响应 */
@@ -68,4 +70,22 @@ export interface Highlight {
   page: number;
   bbox: BBox;
   color?: string;
+  page_width?: number;
+  page_height?: number;
+}
+
+/** 大模型配置 */
+export interface LLMConfigResponse {
+  configured: boolean;
+  provider: string;
+  model: string;
+  api_base: string;
+  api_key_set: boolean;
+  message: string;
+}
+
+export interface LLMConfigRequest {
+  api_key?: string;
+  api_base?: string;
+  model?: string;
 }

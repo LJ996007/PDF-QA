@@ -4,17 +4,27 @@ import { ChatPanel } from './components/ChatPanel';
 import { ResizableSplit } from './components/ResizableSplit';
 import { useChat } from './hooks/useChat';
 import { usePdfHighlight } from './hooks/usePdfHighlight';
-import { uploadPDF, checkLLMStatus } from './services/api';
+import { uploadPDF, checkLLMStatus, getLLMConfig, updateLLMConfig } from './services/api';
 import type { Highlight } from './types';
 
 function App() {
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [documentId, setDocumentId] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [llmStatus, setLlmStatus] = useState<{ configured: boolean; provider: string; message: string } | null>(null);
   const [llmStatusChecked, setLlmStatusChecked] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [configSuccess, setConfigSuccess] = useState<string | null>(null);
+  const [apiBase, setApiBase] = useState('');
+  const [model, setModel] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [apiKeySet, setApiKeySet] = useState(false);
 
   const { messages, isLoading, sendMessage, clearMessages } = useChat();
   const { highlights, addHighlight, clearHighlights } = usePdfHighlight();
@@ -34,8 +44,78 @@ function App() {
     checkStatus();
   }, []);
 
+  const loadConfig = useCallback(async () => {
+    setConfigLoading(true);
+    setConfigError(null);
+    try {
+      const cfg = await getLLMConfig();
+      setApiBase(cfg.api_base || '');
+      setModel(cfg.model || '');
+      setApiKey('');
+      setApiKeySet(cfg.api_key_set);
+    } catch (err) {
+      setConfigError('无法获取当前配置，请检查后端服务');
+    } finally {
+      setConfigLoading(false);
+    }
+  }, []);
+
+  const openSettings = useCallback(async () => {
+    setSettingsOpen(true);
+    setConfigSuccess(null);
+    await loadConfig();
+  }, [loadConfig]);
+
+  const handleSaveConfig = useCallback(async () => {
+    setConfigError(null);
+    setConfigSuccess(null);
+
+    if (!apiBase.trim()) {
+      setConfigError('API Base 不能为空');
+      return;
+    }
+    if (!model.trim()) {
+      setConfigError('模型名称不能为空');
+      return;
+    }
+
+    setConfigSaving(true);
+    try {
+      const payload: { api_key?: string; api_base?: string; model?: string } = {
+        api_base: apiBase.trim(),
+        model: model.trim(),
+      };
+      if (apiKey.trim()) {
+        payload.api_key = apiKey.trim();
+      }
+      const resp = await updateLLMConfig(payload);
+      setApiKey('');
+      setApiKeySet(resp.api_key_set);
+      setConfigSuccess('配置已更新');
+      const status = await checkLLMStatus();
+      setLlmStatus(status);
+    } catch (err) {
+      setConfigError('配置更新失败，请检查后端日志');
+    } finally {
+      setConfigSaving(false);
+    }
+  }, [apiBase, apiKey, model]);
+
+  const applyPreset = useCallback((preset: { api_base: string; model: string }) => {
+    setApiBase(preset.api_base);
+    setModel(preset.model);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pdfUrl) {
+        URL.revokeObjectURL(pdfUrl);
+      }
+    };
+  }, [pdfUrl]);
+
   const handleFileUpload = useCallback(async (file: File) => {
-    if (!file.name.endsWith('.pdf')) {
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
       setUploadError('请上传PDF文件');
       return;
     }
@@ -52,6 +132,7 @@ function App() {
     const url = URL.createObjectURL(file);
     setPdfFile(file);
     setPdfUrl(url);
+    setCurrentPage(1);
     clearMessages();
     clearHighlights();
 
@@ -60,6 +141,9 @@ function App() {
       setDocumentId(response.document_id);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : '上传失败');
+      if (url) {
+        URL.revokeObjectURL(url);
+      }
       setPdfUrl(null);
       setPdfFile(null);
     } finally {
@@ -73,14 +157,24 @@ function App() {
     }
   }, [documentId, sendMessage]);
 
-  const handleReferenceClick = useCallback((refId: string, page: number, bbox: { x0: number; y0: number; x1: number; y1: number }) => {
+  const handleReferenceClick = useCallback(
+    (
+      refId: string,
+      page: number,
+      bbox: { x0: number; y0: number; x1: number; y1: number },
+      pageWidth?: number,
+      pageHeight?: number,
+    ) => {
     const highlight: Highlight = {
       id: refId,
       page,
       bbox,
       color: 'rgba(255, 255, 0, 0.3)',
+      page_width: pageWidth,
+      page_height: pageHeight,
     };
     addHighlight(highlight);
+    setCurrentPage(page);
   }, [addHighlight]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -136,6 +230,13 @@ function App() {
               className="hidden"
             />
           </label>
+          <button
+            type="button"
+            onClick={openSettings}
+            className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            设置
+          </button>
         </div>
       </header>
 
@@ -162,7 +263,14 @@ function App() {
           </div>
         ) : (
           <ResizableSplit
-            left={<PDFViewer fileUrl={pdfUrl} highlights={highlights} />}
+            left={
+              <PDFViewer
+                fileUrl={pdfUrl}
+                highlights={highlights}
+                currentPage={currentPage}
+                onPageChange={setCurrentPage}
+              />
+            }
             right={
               <ChatPanel
                 documentId={documentId}
@@ -175,6 +283,116 @@ function App() {
           />
         )}
       </main>
+
+      {settingsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="w-full max-w-xl rounded-xl bg-white p-6 shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-gray-800">大模型设置</h3>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="mb-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => applyPreset({ api_base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4' })}
+                className="px-3 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200"
+              >
+                智谱 GLM-4
+              </button>
+              <button
+                type="button"
+                onClick={() => applyPreset({ api_base: 'https://api.deepseek.com/v1', model: 'deepseek-chat' })}
+                className="px-3 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200"
+              >
+                DeepSeek
+              </button>
+              <button
+                type="button"
+                onClick={() => applyPreset({ api_base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' })}
+                className="px-3 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200"
+              >
+                通义千问
+              </button>
+              <button
+                type="button"
+                onClick={() => applyPreset({ api_base: 'https://api.openai.com/v1', model: 'gpt-4o-mini' })}
+                className="px-3 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200"
+              >
+                OpenAI
+              </button>
+            </div>
+
+            {configLoading ? (
+              <div className="py-6 text-center text-gray-500">加载配置中...</div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">API Base</label>
+                  <input
+                    type="text"
+                    value={apiBase}
+                    onChange={(e) => setApiBase(e.target.value)}
+                    placeholder="https://api.example.com/v1"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">模型名称</label>
+                  <input
+                    type="text"
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder="例如 glm-4 / deepseek-chat / gpt-4o-mini"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder={apiKeySet ? '已设置（留空不修改）' : '请输入 API Key'}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+            )}
+
+            {configError && (
+              <div className="mt-4 text-sm text-red-600">{configError}</div>
+            )}
+            {configSuccess && (
+              <div className="mt-4 text-sm text-green-600">{configSuccess}</div>
+            )}
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+                className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveConfig}
+                disabled={configSaving || configLoading}
+                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
+              >
+                {configSaving ? '保存中...' : '保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

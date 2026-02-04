@@ -1,5 +1,5 @@
 /** PDF查看器组件 - 显示PDF并支持高亮 */
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import type { Highlight } from '../types';
 
@@ -9,23 +9,25 @@ pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/$
 interface PDFViewerProps {
   fileUrl: string | null;
   highlights: Highlight[];
-  onHighlightRemove?: (page: number) => void;
+  currentPage: number;
+  onPageChange: (page: number) => void;
 }
 
-export function PDFViewer({ fileUrl, highlights, onHighlightRemove }: PDFViewerProps) {
+export function PDFViewer({ fileUrl, highlights, currentPage, onPageChange }: PDFViewerProps) {
   const [numPages, setNumPages] = useState<number>(0);
-  const [currentPage, setCurrentPage] = useState(1);
   const [scale, setScale] = useState(1.2);
-  const canvasRefs = useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const [pageProxy, setPageProxy] = useState<any>(null);
+  const [pageViewport, setPageViewport] = useState<{ width: number; height: number } | null>(null);
 
   const onDocumentLoadSuccess = useCallback(({ numPages }: { numPages: number }) => {
     setNumPages(numPages);
-    setCurrentPage(1);
-  }, []);
+    onPageChange(1);
+  }, [onPageChange]);
 
   const changePage = useCallback((offset: number) => {
-    setCurrentPage((prev) => Math.min(Math.max(1, prev + offset), numPages));
-  }, [numPages]);
+    const nextPage = Math.min(Math.max(1, currentPage + offset), numPages);
+    onPageChange(nextPage);
+  }, [currentPage, numPages, onPageChange]);
 
   const zoomIn = useCallback(() => {
     setScale((prev) => Math.min(prev + 0.2, 3));
@@ -35,29 +37,54 @@ export function PDFViewer({ fileUrl, highlights, onHighlightRemove }: PDFViewerP
     setScale((prev) => Math.max(prev - 0.2, 0.5));
   }, []);
 
+  const handlePageLoadSuccess = useCallback((page: any) => {
+    setPageProxy(page);
+    const viewport = page.getViewport({ scale });
+    setPageViewport({ width: viewport.width, height: viewport.height });
+  }, [scale]);
+
+  useEffect(() => {
+    if (!pageProxy) return;
+    const viewport = pageProxy.getViewport({ scale });
+    setPageViewport({ width: viewport.width, height: viewport.height });
+  }, [pageProxy, scale]);
+
+  useEffect(() => {
+    setPageProxy(null);
+    setPageViewport(null);
+  }, [fileUrl]);
+
   // 渲染高亮层
-  const renderHighlight = useCallback((pageNumber: number, pageWidth: number, pageHeight: number) => {
-    const highlight = highlights.find((h) => h.page === pageNumber);
-    if (!highlight) return null;
+  const renderHighlights = useCallback((pageNumber: number) => {
+    const pageHighlights = highlights.filter((h) => h.page === pageNumber);
+    if (!pageHighlights.length) return null;
 
-    const { bbox } = highlight;
-    const scaleX = pageWidth / 612; // 假设PDF标准宽度为612
-    const scaleY = pageHeight / 792; // 假设PDF标准高度为792
+    const renderedWidth = pageViewport?.width ?? 612 * scale;
+    const renderedHeight = pageViewport?.height ?? 792 * scale;
 
-    return (
-      <div
-        className="absolute pointer-events-none"
-        style={{
-          left: `${bbox.x0 * scaleX}px`,
-          top: `${bbox.y0 * scaleY}px`,
-          width: `${(bbox.x1 - bbox.x0) * scaleX}px`,
-          height: `${(bbox.y1 - bbox.y0) * scaleY}px`,
-          backgroundColor: 'rgba(255, 255, 0, 0.3)',
-          border: '2px solid #facc15',
-        }}
-      />
-    );
-  }, [highlights]);
+    return pageHighlights.map((highlight) => {
+      const { bbox } = highlight;
+      const baseWidth = highlight.page_width && highlight.page_width > 0 ? highlight.page_width : 612;
+      const baseHeight = highlight.page_height && highlight.page_height > 0 ? highlight.page_height : 792;
+      const scaleX = renderedWidth / baseWidth;
+      const scaleY = renderedHeight / baseHeight;
+
+      return (
+        <div
+          key={`${highlight.id}-${pageNumber}`}
+          className="absolute pointer-events-none"
+          style={{
+            left: `${bbox.x0 * scaleX}px`,
+            top: `${bbox.y0 * scaleY}px`,
+            width: `${(bbox.x1 - bbox.x0) * scaleX}px`,
+            height: `${(bbox.y1 - bbox.y0) * scaleY}px`,
+            backgroundColor: highlight.color || 'rgba(255, 255, 0, 0.3)',
+            border: '2px solid #facc15',
+          }}
+        />
+      );
+    });
+  }, [highlights, pageViewport, scale]);
 
   return (
     <div className="flex flex-col h-full bg-gray-100">
@@ -148,13 +175,14 @@ export function PDFViewer({ fileUrl, highlights, onHighlightRemove }: PDFViewerP
               <Page
                 pageNumber={currentPage}
                 scale={scale}
+                onLoadSuccess={handlePageLoadSuccess}
                 renderTextLayer={false}
                 renderAnnotationLayer={false}
                 className="shadow-lg"
               />
             </Document>
-            {/* 高亮层 - 简化实现，实际需要更精确的位置计算 */}
-            {renderHighlight(currentPage, 612 * scale, 792 * scale)}
+            {/* 高亮层 */}
+            {renderHighlights(currentPage)}
           </div>
         )}
       </div>

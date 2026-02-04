@@ -56,6 +56,8 @@ class VectorStore:
                 "y0": str(para.bbox.get("y0", 0)),
                 "x1": str(para.bbox.get("x1", 0)),
                 "y1": str(para.bbox.get("y1", 0)),
+                "page_width": str(para.page_width if para.page_width is not None else 0),
+                "page_height": str(para.page_height if para.page_height is not None else 0),
                 "text": para.text  # 存储原文用于返回
             })
 
@@ -111,6 +113,8 @@ class VectorStore:
                         "x1": float(metadata.get("x1", 0)),
                         "y1": float(metadata.get("y1", 0))
                     },
+                    "page_width": float(metadata.get("page_width", 0)),
+                    "page_height": float(metadata.get("page_height", 0)),
                     "score": 1 - results["distances"][0][i]  # 转换为相似度分数
                 })
 
@@ -142,7 +146,9 @@ class VectorStore:
                     "y0": float(metadata.get("y0", 0)),
                     "x1": float(metadata.get("x1", 0)),
                     "y1": float(metadata.get("y1", 0))
-                }
+                },
+                "page_width": float(metadata.get("page_width", 0)),
+                "page_height": float(metadata.get("page_height", 0))
             }
         return None
 

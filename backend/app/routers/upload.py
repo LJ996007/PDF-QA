@@ -1,6 +1,6 @@
 """上传接口 - 上传PDF并解析"""
 import os
-import shutil
+import uuid
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from typing import Dict
 from app.services.pdf_parser import PDFParser, is_valid_pdf
@@ -35,27 +35,42 @@ async def upload_pdf(file: UploadFile = File(...)):
     4. 向量化存储到ChromaDB
     """
     # 1. 验证文件类型
-    if not file.filename.endswith('.pdf'):
+    filename = file.filename or ""
+    if not filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="只支持PDF文件")
+    original_filename = os.path.basename(filename)
 
-    # 2. 读取文件内容并检查大小
-    file_content = await file.read()
-    file_size_mb = len(file_content) / (1024 * 1024)
-
-    if file_size_mb > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"文件大小超过限制（最大{MAX_FILE_SIZE}MB）"
-        )
-
-    # 3. 保存文件
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
+    # 2. 生成文档ID并保存文件
+    document_id = uuid.uuid4().hex[:8]
+    file_path = os.path.join(UPLOAD_DIR, f"{document_id}.pdf")
 
     # 确保上传目录存在
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-    with open(file_path, "wb") as f:
-        f.write(file_content)
+    # 3. 流式写入并检查大小
+    max_size_bytes = MAX_FILE_SIZE * 1024 * 1024
+    written = 0
+    try:
+        with open(file_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)  # 1MB
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_size_bytes:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"文件大小超过限制（最大{MAX_FILE_SIZE}MB）"
+                    )
+                f.write(chunk)
+    except HTTPException:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise
+    except Exception as e:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=500, detail=f"文件保存失败: {str(e)}")
 
     # 4. 验证是否为有效PDF
     if not is_valid_pdf(file_path):
@@ -64,7 +79,7 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     # 5. 解析PDF
     try:
-        parser = PDFParser(file_path)
+        parser = PDFParser(file_path, document_id=document_id)
         paragraphs, metadata = parser.parse()
         parser.close()
     except Exception as e:
@@ -85,7 +100,7 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     return UploadResponse(
         document_id=metadata["id"],
-        filename=file.filename,
+        filename=original_filename,
         total_pages=metadata["total_pages"],
         paragraph_count=metadata["paragraph_count"],
         message="解析成功"
