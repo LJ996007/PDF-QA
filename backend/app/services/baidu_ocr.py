@@ -191,8 +191,93 @@ class BaiduOCRGateway:
             import traceback
             traceback.print_exc()
         
-        print(f"[PP-OCRv5] Parsed {len(chunks)} chunks with coordinates")
-        return chunks
+        print(f"[PP-OCRv5] Parsed {len(chunks)} raw chunks")
+        
+        # 3. 后处理：合并相邻块 & 过滤
+        merged_chunks = self._merge_ocr_chunks(chunks, page_height)
+        print(f"[PP-OCRv5] Merged into {len(merged_chunks)} chunks")
+        
+        return merged_chunks
+
+    def _merge_ocr_chunks(self, chunks: List[OCRChunk], page_height: float) -> List[OCRChunk]:
+        """
+        合并相邻的文本块，过滤低质量内容
+        合并规则：
+        1. 同一行（Y坐标接近）
+        2. 水平距离近（X坐标连续）
+        """
+        if not chunks:
+            return []
+
+        # 1. 过滤无效块
+        valid_chunks = []
+        for chunk in chunks:
+            # 过滤掉空文本或过短的非数字符号
+            if not chunk.text or len(chunk.text.strip()) == 0:
+                continue
+            # 简单过滤：单个字符且非数字/字母（标点符号）
+            if len(chunk.text.strip()) == 1 and not chunk.text.strip().isalnum():
+                continue
+            valid_chunks.append(chunk)
+
+        if not valid_chunks:
+            return []
+
+        # 按Y坐标排序（主要），X坐标排序（次要）
+        # 允许一定的Y误差（行高的一半）
+        sorted_chunks = sorted(valid_chunks, key=lambda c: (c.bbox.y, c.bbox.x))
+        
+        merged = []
+        current_block = sorted_chunks[0]
+        
+        for next_chunk in sorted_chunks[1:]:
+            # 判断是否同一行
+            # Y坐标差异小于行高的一半 (假设行高约10-15px，这里取10作为阈值，或者动态计算)
+            y_diff = abs(current_block.bbox.y - next_chunk.bbox.y)
+            height_avg = (current_block.bbox.h + next_chunk.bbox.h) / 2
+            
+            # 判断水平距离
+            # next.x 应该在 current.x + current.w 附近
+            x_gap = next_chunk.bbox.x - (current_block.bbox.x + current_block.bbox.w)
+            
+            # 合并条件：
+            # 1. Y 差距小 (认为是同一行)
+            # 2. X 差距不大 (认为是同一句话的断开，或者中间有空格)
+            # 3. 如果X差距过大（如表格的列），则不合并
+            
+            is_same_line = y_diff < (height_avg * 0.5)
+            is_adjacent = -20 < x_gap < 50  # 允许重叠(-20)或一定间距(50)
+            
+            if is_same_line and is_adjacent:
+                # 合并
+                # 扩展边界框
+                new_x = min(current_block.bbox.x, next_chunk.bbox.x)
+                new_y = min(current_block.bbox.y, next_chunk.bbox.y)
+                new_max_x = max(current_block.bbox.x + current_block.bbox.w, next_chunk.bbox.x + next_chunk.bbox.w)
+                new_max_y = max(current_block.bbox.y + current_block.bbox.h, next_chunk.bbox.y + next_chunk.bbox.h)
+                
+                merged_bbox = BoundingBox(
+                    page=current_block.bbox.page,
+                    x=new_x,
+                    y=new_y,
+                    w=new_max_x - new_x,
+                    h=new_max_y - new_y
+                )
+                
+                # 合并文本（加空格）
+                current_block = OCRChunk(
+                    text=current_block.text + " " + next_chunk.text,
+                    bbox=merged_bbox
+                )
+            else:
+                # 开始新块
+                merged.append(current_block)
+                current_block = next_chunk
+        
+        # 添加最后一个块
+        merged.append(current_block)
+        
+        return merged
 
 
 # 全局实例

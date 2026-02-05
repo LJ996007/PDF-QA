@@ -133,14 +133,15 @@ class RAGEngine:
         all_ids = []
         all_metadatas = []
         
+        # 全局 chunk 计数器 (用于生成 b0001)
+        global_chunk_count = 0
+
         for page in pages:
             if not page.text:
                 continue
                 
             # 检查是否有OCR坐标数据
             has_coords = page.coordinates and len(page.coordinates) > 0
-            
-            print(f"[RAG Index] Page {page.page_number}: type={page.type}, text_len={len(page.text)}, has_coords={has_coords}, coords_count={len(page.coordinates) if page.coordinates else 0}")
             
             if has_coords:
                 # 有精确坐标（OCR或原生文本），按行/块索引
@@ -149,8 +150,12 @@ class RAGEngine:
                 for idx, text in enumerate(text_lines):
                     if not text.strip():
                         continue
-
-                    chunk_id = f"{doc_id}_p{page.page_number}_c{idx}"
+                    
+                    global_chunk_count += 1
+                    block_id = f"b{global_chunk_count:04d}" # b0001, b0002...
+                    
+                    # 传统的唯一ID (用于Chroma去重)
+                    chunk_id = f"{doc_id}_{block_id}"
 
                     # 获取对应的坐标
                     if idx < len(page.coordinates):
@@ -159,10 +164,6 @@ class RAGEngine:
                         bbox_y = coord.y if hasattr(coord, 'y') else coord.get('y', 50)
                         bbox_w = coord.w if hasattr(coord, 'w') else coord.get('w', 400)
                         bbox_h = coord.h if hasattr(coord, 'h') else coord.get('h', 30)
-                        
-                        # 调试日志：打印前3个坐标
-                        if idx < 3:
-                            print(f"[RAG Index] Chunk {idx}: text='{text[:20]}...', bbox=({bbox_x:.1f},{bbox_y:.1f},{bbox_w:.1f},{bbox_h:.1f})")
                     else:
                         # 没有坐标时使用估算
                         bbox_x = 50
@@ -170,23 +171,30 @@ class RAGEngine:
                         bbox_w = 500
                         bbox_h = 30
 
+                    # 文本每行前面加上 ID 标记，帮助 Embedding (可选，或者只存在 metadata)
+                    # 最好只在 Context 中加，Index 时保持纯净文本？
+                    # 这里的 all_chunks 是用于 Embedding 的
                     all_chunks.append(text)
                     all_ids.append(chunk_id)
                     all_metadatas.append({
                         "doc_id": doc_id,
                         "page": page.page_number,
                         "source": page.type,
+                        "block_id": block_id,  # 存入元数据
                         "bbox_x": float(bbox_x),
                         "bbox_y": float(bbox_y),
                         "bbox_w": float(bbox_w),
                         "bbox_h": float(bbox_h)
                     })
             else:
-                # 无精确坐标：按段落切分，使用估算坐标
+                # 无精确坐标：按段落切分
                 text_chunks = self._chunk_text(page.text)
 
                 for idx, chunk_text in enumerate(text_chunks):
-                    chunk_id = f"{doc_id}_p{page.page_number}_c{idx}"
+                    global_chunk_count += 1
+                    block_id = f"b{global_chunk_count:04d}"
+                    chunk_id = f"{doc_id}_{block_id}"
+                    
                     y_ratio = 1.0 - (idx / max(len(text_chunks), 1))
 
                     all_chunks.append(chunk_text)
@@ -195,6 +203,7 @@ class RAGEngine:
                         "doc_id": doc_id,
                         "page": page.page_number,
                         "source": page.type,
+                        "block_id": block_id,
                         "bbox_x": 50,
                         "bbox_y": y_ratio * 700,
                         "bbox_w": 500,
@@ -364,18 +373,19 @@ class RAGEngine:
             bm25 = cache["model"]
             doc_ids = cache["ids"]
             
-            tokenized_query = self._tokenize(query)
-            # 获取所有分数
-            doc_scores = bm25.get_scores(tokenized_query)
-            
-            # 获取Top N的索引
-            # argsort是升序，所以取最后k个并反转
-            import numpy as np
-            top_indices = np.argsort(doc_scores)[-k_vector:][::-1]
-            
-            for idx in top_indices:
-                if doc_scores[idx] > 0: # 只保留有匹配项的结果
-                    bm25_top_n.append(doc_ids[idx])
+            if bm25:
+                tokenized_query = self._tokenize(query)
+                # 获取所有分数
+                doc_scores = bm25.get_scores(tokenized_query)
+                
+                # 获取Top N的索引
+                # argsort是升序，所以取最后k个并反转
+                import numpy as np
+                top_indices = np.argsort(doc_scores)[-k_vector:][::-1]
+                
+                for idx in top_indices:
+                    if doc_scores[idx] > 0: # 只保留有匹配项的结果
+                        bm25_top_n.append(doc_ids[idx])
         
         # 3. RRF融合 (Reciprocal Rank Fusion)
         # Score = 1 / (k + rank)
@@ -431,7 +441,8 @@ class RAGEngine:
                 ),
                 source_type=metadata["source"],
                 distance=0, # Hybrid search score makes distance confusing, setting to 0 or could set to 1/score
-                ref_id=f"ref-{len(chunks)+1}"
+                ref_id=f"ref-{len(chunks)+1}",
+                block_id=metadata.get("block_id")
             ))
             
         return chunks

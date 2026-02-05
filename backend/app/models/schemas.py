@@ -35,6 +35,7 @@ class TextChunk(BaseModel):
     source_type: Literal["native", "ocr"]
     distance: Optional[float] = None
     ref_id: Optional[str] = None
+    block_id: Optional[str] = None # Unique block ID for citation (e.g., b0001)
 
 
 class Document(BaseModel):

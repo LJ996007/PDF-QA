@@ -75,7 +75,7 @@ async def process_document_async(
                 # 执行OCR
                 for idx, page in enumerate(ocr_pages):
                     print(f"[DEBUG] Processing OCR for page {idx+1}/{ocr_count}")
-                    progress_percent = int(10 + (idx / ocr_count) * 40)  # 10% -> 50%
+                    progress_percent = int(10 + (idx / ocr_count) * 40)
                     document_progress[doc_id] = ProgressEvent(
                         stage="extracting",
                         current=progress_percent,
@@ -94,10 +94,8 @@ async def process_document_async(
                             with Image.open(io.BytesIO(img_data)) as img:
                                 width, height = img.size
                                 print(f"[DEBUG] Image size: {width}x{height}")
-                                # DPI=150 in parser.py
                                 pdf_width = width * 72 / 150
                                 pdf_height = height * 72 / 150
-                                print(f"[DEBUG] Calculated PDF size: {pdf_width:.1f}x{pdf_height:.1f} points")
                                 
                                 print(f"[DEBUG] Calling Baidu OCR for page {page.page_number}")
                                 
@@ -124,12 +122,11 @@ async def process_document_async(
                                     page.text = "\n".join(all_text)
                                     page.coordinates = all_coords
                                     page.confidence = 0.9
-                                    print(f"[DEBUG] Page {page.page_number} text length: {len(page.text)}, coords count: {len(all_coords)}")
-                                    print(f"[DEBUG] Page {page.page_number} text preview: {page.text[:200]}...")
+                                    print(f"[DEBUG] Page {page.page_number} text length: {len(page.text)}")
                                 else:
                                     print(f"[WARNING] OCR returned 0 chunks for page {page.page_number}")
                         except Exception as e:
-                            print(f"[ERROR] OCR processing failed for page {page.page_number}: {e}")
+                            print(f"[ERROR] OCR processing failed: {e}")
                             import traceback
                             traceback.print_exc()
         
@@ -241,6 +238,12 @@ async def upload_document(
         document_id=doc_id
     )
     
+    # 加载环境变量中的Baidu OCR配置
+    if not baidu_ocr_url:
+        baidu_ocr_url = os.getenv("BAIDU_OCR_API_URL")
+    if not baidu_ocr_token:
+        baidu_ocr_token = os.getenv("BAIDU_OCR_TOKEN")
+
     # 后台处理
     background_tasks.add_task(
         process_document_async, 

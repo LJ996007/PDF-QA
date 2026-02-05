@@ -68,7 +68,8 @@ export const HighlightLayer: React.FC<HighlightLayerProps> = memo(({
                 }
 
                 // 提取引用数字
-                const refNumber = chunk.refId?.replace('ref-', '') || '?';
+                const refNumStr = (chunk as any).ref_id || chunk.refId || '';
+                const refNumber = refNumStr.replace('ref-', '') || '?';
 
                 return (
                     <g key={chunk.id}>
@@ -85,8 +86,8 @@ export const HighlightLayer: React.FC<HighlightLayerProps> = memo(({
                             <title>{chunk.content?.substring(0, 100) || ''}...</title>
                         </rect>
 
-                        {/* 引用标签 */}
-                        <g transform={`translate(${rect.x + rect.width - 20}, ${Math.max(0, rect.y - 8)})`}>
+                        {/* 引用标签 - 移到高亮右侧，避免遮挡内容 */}
+                        <g transform={`translate(${rect.x + rect.width + 6}, ${Math.max(0, rect.y - 8)})`}>
                             <rect
                                 x={0}
                                 y={0}

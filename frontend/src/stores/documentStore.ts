@@ -21,6 +21,7 @@ export interface BoundingBox {
 export interface TextChunk {
     id: string;
     refId: string;
+    ref_id?: string; // Backend snake_case compatibility
     content: string;
     page: number;
     bbox: BoundingBox;
@@ -115,9 +116,19 @@ interface DocumentState {
     // 配置
     config: AppConfig;
 
+    // 合规性检查状态
+    complianceResults: ComplianceItem[];
+    complianceMarkdown: string;
+    complianceRequirements: string;
+
     // Actions
     setDocument: (doc: Document, pdfUrl: string) => void;
     clearDocument: () => void;
+
+    // 合规性Actions
+    setComplianceResults: (results: ComplianceItem[], markdown: string) => void;
+    setComplianceRequirements: (text: string) => void;
+
     setScale: (scale: number) => void;
     setCurrentPage: (page: number) => void;
     setHighlights: (chunks: TextChunk[]) => void;
@@ -238,6 +249,11 @@ export const useDocumentStore = create<DocumentState>()(
             isLoading: false,
             config: initializeConfig(),
 
+            // 合规性初始状态
+            complianceResults: [],
+            complianceMarkdown: '',
+            complianceRequirements: '',
+
             // 文档操作
             setDocument: (doc, pdfUrl) => set((state) => {
                 state.currentDocument = doc;
@@ -245,6 +261,10 @@ export const useDocumentStore = create<DocumentState>()(
                 state.currentPage = 1;
                 state.highlights = [];
                 state.messages = [];
+                // 重置合规性状态
+                state.complianceResults = [];
+                state.complianceMarkdown = '';
+                state.complianceRequirements = '';
             }),
 
             clearDocument: () => set((state) => {
@@ -252,6 +272,19 @@ export const useDocumentStore = create<DocumentState>()(
                 state.pdfUrl = null;
                 state.highlights = [];
                 state.messages = [];
+                state.complianceResults = [];
+                state.complianceMarkdown = '';
+                state.complianceRequirements = '';
+            }),
+
+            // 合规性操作
+            setComplianceResults: (results, markdown) => set((state) => {
+                state.complianceResults = results;
+                state.complianceMarkdown = markdown;
+            }),
+
+            setComplianceRequirements: (text) => set((state) => {
+                state.complianceRequirements = text;
             }),
 
             // 渲染状态

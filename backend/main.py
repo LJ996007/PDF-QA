@@ -7,6 +7,10 @@ from contextlib import asynccontextmanager
 import os
 import sys
 import io
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
 
 # 强制设置 stdout/stderr 为 UTF-8 编码（解决 Windows GBK 编码问题）
 if sys.platform == 'win32':
