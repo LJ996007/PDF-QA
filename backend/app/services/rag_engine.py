@@ -6,9 +6,9 @@ from chromadb.config import Settings
 import hashlib
 import os
 import re
+import json
 from typing import List, Optional
 import httpx
-import json
 
 
 from app.models.schemas import TextChunk, PageContent, BoundingBox
@@ -126,6 +126,40 @@ class RAGEngine:
                 return True
 
         return False
+
+    def _select_best_line_index(self, query: str, lines: List[str]) -> int:
+        """
+        Pick the most relevant line inside a multi-line chunk for tighter highlight bbox.
+
+        We keep chunk-level retrieval for recall, but return a line-level bbox for precision.
+        """
+        if not lines:
+            return 0
+        q = (query or "").strip()
+        if not q:
+            return 0
+
+        # Extract meaningful tokens (works even when jieba is unavailable).
+        tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z]{2,}|\d{2,}", q)
+        if not tokens:
+            tokens = [q]
+
+        best_i = 0
+        best_score = -1
+        for i, line in enumerate(lines):
+            t = (line or "").strip()
+            if not t:
+                continue
+            score = 0
+            for tok in tokens:
+                if tok and tok in t:
+                    score += 2
+            # Small bonus for longer informative lines.
+            score += min(len(t), 120) / 120.0
+            if score > best_score:
+                best_score = score
+                best_i = i
+        return best_i
     
     def _chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
         """
@@ -208,18 +242,21 @@ class RAGEngine:
 
                 current_texts = []
                 current_bbox = None  # (x0, y0, x1, y1)
+                current_line_bboxes = []  # list of per-line bbox dicts in the same order as current_texts
 
                 def flush_current():
-                    nonlocal global_chunk_count, current_texts, current_bbox
+                    nonlocal global_chunk_count, current_texts, current_bbox, current_line_bboxes
                     if not current_texts or not current_bbox:
                         current_texts = []
                         current_bbox = None
+                        current_line_bboxes = []
                         return
 
                     chunk_text = "\n".join(current_texts).strip()
                     if not chunk_text or self._is_low_value_text(chunk_text):
                         current_texts = []
                         current_bbox = None
+                        current_line_bboxes = []
                         return
 
                     global_chunk_count += 1
@@ -237,11 +274,14 @@ class RAGEngine:
                         "bbox_x": float(x0),
                         "bbox_y": float(y0),
                         "bbox_w": float(x1 - x0),
-                        "bbox_h": float(y1 - y0)
+                        "bbox_h": float(y1 - y0),
+                        # Store per-line boxes so we can return a tighter highlight bbox later.
+                        "bbox_lines": json.dumps(current_line_bboxes, ensure_ascii=False),
                     })
 
                     current_texts = []
                     current_bbox = None
+                    current_line_bboxes = []
 
                 for text, bbox_x, bbox_y, bbox_w, bbox_h in entries:
                     x0 = bbox_x
@@ -252,6 +292,7 @@ class RAGEngine:
                     if not current_texts:
                         current_texts = [text]
                         current_bbox = (x0, y0, x1, y1)
+                        current_line_bboxes = [{"x": x0, "y": y0, "w": bbox_w, "h": bbox_h}]
                         continue
 
                     # Approx length with newlines.
@@ -262,9 +303,11 @@ class RAGEngine:
                         flush_current()
                         current_texts = [text]
                         current_bbox = (x0, y0, x1, y1)
+                        current_line_bboxes = [{"x": x0, "y": y0, "w": bbox_w, "h": bbox_h}]
                         continue
 
                     current_texts.append(text)
+                    current_line_bboxes.append({"x": x0, "y": y0, "w": bbox_w, "h": bbox_h})
                     cx0, cy0, cx1, cy1 = current_bbox
                     current_bbox = (min(cx0, x0), min(cy0, y0), max(cx1, x1), max(cy1, y1))
 
@@ -517,6 +560,29 @@ class RAGEngine:
 
             if self._is_low_value_text(content):
                 continue
+
+            # Tighten highlight bbox when we have per-line bboxes stored in metadata.
+            bbox_x = metadata["bbox_x"]
+            bbox_y = metadata["bbox_y"]
+            bbox_w = metadata["bbox_w"]
+            bbox_h = metadata["bbox_h"]
+            bbox_lines_raw = metadata.get("bbox_lines")
+            if bbox_lines_raw:
+                try:
+                    bbox_lines = json.loads(bbox_lines_raw) if isinstance(bbox_lines_raw, str) else None
+                except Exception:
+                    bbox_lines = None
+
+                if isinstance(bbox_lines, list) and bbox_lines:
+                    lines = content.split("\n")
+                    li = self._select_best_line_index(query, lines[: len(bbox_lines)])
+                    li = max(0, min(li, len(bbox_lines) - 1))
+                    b = bbox_lines[li] or {}
+                    if all(k in b for k in ("x", "y", "w", "h")):
+                        bbox_x = float(b["x"])
+                        bbox_y = float(b["y"])
+                        bbox_w = float(b["w"])
+                        bbox_h = float(b["h"])
             
             chunks.append(TextChunk(
                 id=chunk_id,
@@ -525,10 +591,10 @@ class RAGEngine:
                 content=content,
                 bbox=BoundingBox(
                     page=metadata["page"],
-                    x=metadata["bbox_x"],
-                    y=metadata["bbox_y"],
-                    w=metadata["bbox_w"],
-                    h=metadata["bbox_h"]
+                    x=bbox_x,
+                    y=bbox_y,
+                    w=bbox_w,
+                    h=bbox_h
                 ),
                 source_type=metadata["source"],
                 distance=0, # Hybrid search score makes distance confusing, setting to 0 or could set to 1/score
