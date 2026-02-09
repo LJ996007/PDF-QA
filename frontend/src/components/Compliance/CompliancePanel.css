@@ -169,6 +169,12 @@
     vertical-align: top;
 }
 
+/* ReactMarkdown may wrap cell content with <p>, whose default margins create a visible "gap". */
+.markdown-result th > p,
+.markdown-result td > p {
+    margin: 0;
+}
+
 .markdown-result th {
     background: var(--bg-tertiary);
     color: var(--text-primary);
