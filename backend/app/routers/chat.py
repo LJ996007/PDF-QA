@@ -63,6 +63,35 @@ async def chat(request: ChatRequest):
                 "refs": refs_data
             })
         }
+
+        # If we cannot retrieve any chunk, do not call the LLM with an empty context.
+        # This avoids hallucinated citations and gives the user actionable next steps.
+        if not chunks:
+            doc = documents.get(doc_id, {})
+            ocr_pages = doc.get("ocr_required_pages") or []
+
+            hint = "未从文档索引中检索到任何内容。"
+            if ocr_pages:
+                hint += f" 该文档可能是扫描件（{len(ocr_pages)} 页需要 OCR）。请在设置中配置可用的 OCR 服务（百度 PP-OCR 的 API 地址/Token），或检查 OCR 是否调用成功。"
+            else:
+                hint += " 请确认文档是否已成功解析并建立索引。"
+
+            yield {
+                "event": "message",
+                "data": json.dumps({
+                    "type": "content",
+                    "text": hint,
+                    "active_refs": []
+                })
+            }
+            yield {
+                "event": "message",
+                "data": json.dumps({
+                    "type": "done",
+                    "final_refs": []
+                })
+            }
+            return
         
         # 2. 流式生成回答
         all_refs = set()

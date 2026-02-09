@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { useDocumentStore, type ComplianceItem } from '../../stores/documentStore';
+import { useDocumentStore } from '../../stores/documentStore';
 import './CompliancePanel.css';
 
 interface CompliancePanelProps {

@@ -5,6 +5,7 @@ import chromadb
 from chromadb.config import Settings
 import hashlib
 import os
+import re
 from typing import List, Optional
 import httpx
 import json
@@ -93,6 +94,38 @@ class RAGEngine:
             byte_idx = i % len(hash_bytes)
             embedding.append((hash_bytes[byte_idx] - 128) / 128.0)
         return embedding
+
+    def _is_low_value_text(self, text: str) -> bool:
+        """
+        Heuristic filter to drop OCR noise (single letters, pure punctuation, etc.).
+
+        This improves retrieval quality on scanned PDFs where OCR can emit many tiny fragments.
+        """
+        t = (text or "").strip()
+        if not t:
+            return True
+
+        compact = re.sub(r"\s+", "", t)
+        if len(compact) <= 2:
+            return True
+
+        if re.fullmatch(r"[\W_]+", compact, flags=re.UNICODE):
+            return True
+
+        has_cjk = any("\u4e00" <= c <= "\u9fff" for c in compact)
+        if has_cjk and len(compact) <= 3:
+            return True
+
+        if compact.isascii():
+            # Drop short ASCII-only words/numbers (common OCR artifacts).
+            if re.fullmatch(r"[A-Za-z]{1,4}", compact):
+                return True
+            if re.fullmatch(r"\d{1,2}", compact):
+                return True
+            if len(compact) <= 4 and not re.fullmatch(r"\d{3,4}", compact):
+                return True
+
+        return False
     
     def _chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
         """
@@ -146,16 +179,13 @@ class RAGEngine:
             if has_coords:
                 # 有精确坐标（OCR或原生文本），按行/块索引
                 text_lines = page.text.split('\n')
-
+                # Build (text, bbox) entries first (skip OCR noise), then merge consecutive
+                # lines into slightly larger chunks for better retrieval quality.
+                entries = []
                 for idx, text in enumerate(text_lines):
-                    if not text.strip():
+                    text = text.strip()
+                    if not text or self._is_low_value_text(text):
                         continue
-                    
-                    global_chunk_count += 1
-                    block_id = f"b{global_chunk_count:04d}" # b0001, b0002...
-                    
-                    # 传统的唯一ID (用于Chroma去重)
-                    chunk_id = f"{doc_id}_{block_id}"
 
                     # 获取对应的坐标
                     if idx < len(page.coordinates):
@@ -171,26 +201,81 @@ class RAGEngine:
                         bbox_w = 500
                         bbox_h = 30
 
-                    # 文本每行前面加上 ID 标记，帮助 Embedding (可选，或者只存在 metadata)
-                    # 最好只在 Context 中加，Index 时保持纯净文本？
-                    # 这里的 all_chunks 是用于 Embedding 的
-                    all_chunks.append(text)
+                    entries.append((text, float(bbox_x), float(bbox_y), float(bbox_w), float(bbox_h)))
+
+                coord_chunk_chars = 320
+                coord_chunk_max_lines = 8
+
+                current_texts = []
+                current_bbox = None  # (x0, y0, x1, y1)
+
+                def flush_current():
+                    nonlocal global_chunk_count, current_texts, current_bbox
+                    if not current_texts or not current_bbox:
+                        current_texts = []
+                        current_bbox = None
+                        return
+
+                    chunk_text = "\n".join(current_texts).strip()
+                    if not chunk_text or self._is_low_value_text(chunk_text):
+                        current_texts = []
+                        current_bbox = None
+                        return
+
+                    global_chunk_count += 1
+                    block_id = f"b{global_chunk_count:04d}"  # b0001, b0002...
+                    chunk_id = f"{doc_id}_{block_id}"  # Unique ID for Chroma
+
+                    x0, y0, x1, y1 = current_bbox
+                    all_chunks.append(chunk_text)
                     all_ids.append(chunk_id)
                     all_metadatas.append({
                         "doc_id": doc_id,
                         "page": page.page_number,
                         "source": page.type,
-                        "block_id": block_id,  # 存入元数据
-                        "bbox_x": float(bbox_x),
-                        "bbox_y": float(bbox_y),
-                        "bbox_w": float(bbox_w),
-                        "bbox_h": float(bbox_h)
+                        "block_id": block_id,
+                        "bbox_x": float(x0),
+                        "bbox_y": float(y0),
+                        "bbox_w": float(x1 - x0),
+                        "bbox_h": float(y1 - y0)
                     })
+
+                    current_texts = []
+                    current_bbox = None
+
+                for text, bbox_x, bbox_y, bbox_w, bbox_h in entries:
+                    x0 = bbox_x
+                    y0 = bbox_y
+                    x1 = bbox_x + bbox_w
+                    y1 = bbox_y + bbox_h
+
+                    if not current_texts:
+                        current_texts = [text]
+                        current_bbox = (x0, y0, x1, y1)
+                        continue
+
+                    # Approx length with newlines.
+                    current_len = sum(len(t) for t in current_texts) + max(len(current_texts) - 1, 0)
+                    next_len = current_len + 1 + len(text)
+
+                    if next_len > coord_chunk_chars or len(current_texts) >= coord_chunk_max_lines:
+                        flush_current()
+                        current_texts = [text]
+                        current_bbox = (x0, y0, x1, y1)
+                        continue
+
+                    current_texts.append(text)
+                    cx0, cy0, cx1, cy1 = current_bbox
+                    current_bbox = (min(cx0, x0), min(cy0, y0), max(cx1, x1), max(cy1, y1))
+
+                flush_current()
             else:
                 # 无精确坐标：按段落切分
                 text_chunks = self._chunk_text(page.text)
 
                 for idx, chunk_text in enumerate(text_chunks):
+                    if self._is_low_value_text(chunk_text):
+                        continue
                     global_chunk_count += 1
                     block_id = f"b{global_chunk_count:04d}"
                     chunk_id = f"{doc_id}_{block_id}"
@@ -356,7 +441,8 @@ class RAGEngine:
         # 混合检索实现 (RRF Fusion)
         
         # 1. 向量检索 (Vector Search)
-        k_vector = top_k * 2 #以此获取更多候选项
+        # Get enough candidates so we can filter OCR noise and still return top_k results.
+        k_vector = max(top_k * 10, 50)
         vector_results = self.collection.query(
             query_embeddings=[query_embedding],
             where={"doc_id": doc_id},
@@ -403,29 +489,34 @@ class RAGEngine:
              
         # 4. 排序并获取Chunk详情
         # 按分数降序
-        sorted_ids = sorted(final_scores.keys(), key=lambda x: final_scores[x], reverse=True)[:top_k]
+        candidate_ids = sorted(final_scores.keys(), key=lambda x: final_scores[x], reverse=True)
         
-        if not sorted_ids:
+        if not candidate_ids:
             return []
             
         # 批量获取Chunk详情
         # ChromaDB .get() 
+        candidate_limit = max(top_k * 20, 200)
+        candidate_ids = candidate_ids[:candidate_limit]
         final_chunks_data = self.collection.get(
-            ids=sorted_ids,
+            ids=candidate_ids,
             include=["documents", "metadatas"]
         )
         
-        # 构建返回对象，需要按sorted_ids的顺序
+        # 构建返回对象，需要按candidate_ids的顺序
         id_map = {id_: i for i, id_ in enumerate(final_chunks_data["ids"])}
         
         chunks = []
-        for chunk_id in sorted_ids:
+        for chunk_id in candidate_ids:
             if chunk_id not in id_map:
                 continue
                 
             idx = id_map[chunk_id]
             metadata = final_chunks_data["metadatas"][idx]
             content = final_chunks_data["documents"][idx]
+
+            if self._is_low_value_text(content):
+                continue
             
             chunks.append(TextChunk(
                 id=chunk_id,
@@ -444,6 +535,9 @@ class RAGEngine:
                 ref_id=f"ref-{len(chunks)+1}",
                 block_id=metadata.get("block_id")
             ))
+
+            if len(chunks) >= top_k:
+                break
             
         return chunks
     

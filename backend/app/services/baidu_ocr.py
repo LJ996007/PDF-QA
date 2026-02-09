@@ -65,7 +65,13 @@ class BaiduOCRGateway:
                 print(f"[PP-OCRv5] Response status: {response.status_code}")
                 
                 if response.status_code != 200:
-                    print(f"[PP-OCRv5] Error response: {response.text[:500]}")
+                    err_text = (response.text or "").strip()
+                    print(f"[PP-OCRv5] Error response: {err_text[:500]}")
+
+                    # Auth failures should be surfaced so callers can fallback to local OCR.
+                    if response.status_code in (401, 403):
+                        raise PermissionError(f"PP-OCRv5 request forbidden ({response.status_code}). Check API URL/token.")
+
                     return []
                 
                 result = response.json()
@@ -84,6 +90,8 @@ class BaiduOCRGateway:
             
             return self._parse_ocr_result(ocr_results, page_number, page_width, page_height)
             
+        except PermissionError:
+            raise
         except Exception as e:
             print(f"[PP-OCRv5] Execution failed: {e}")
             import traceback

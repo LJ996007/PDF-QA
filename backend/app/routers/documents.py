@@ -16,6 +16,7 @@ from app.services.parser import process_document, get_ocr_required_pages
 from app.services.rag_engine import rag_engine
 from app.services.ocr_gateway import ocr_gateway
 from app.services.baidu_ocr import baidu_ocr_gateway
+from app.services.local_ocr import local_ocr_gateway
 
 # 配置日志
 logging.basicConfig(level=logging.DEBUG)
@@ -69,66 +70,87 @@ async def process_document_async(
             
             logger.info(f"[DOC] OCR provider: {ocr_provider}, has_baidu_key: {has_baidu_key}")
             
+            # 执行OCR
+            # If Baidu credentials are missing or Baidu auth fails, use local OCR fallback.
+            force_local_ocr = not has_baidu_key
             if not has_baidu_key:
-                logger.warning(f"Document needs OCR but Baidu credentials not provided")
-            else:
-                # 执行OCR
-                for idx, page in enumerate(ocr_pages):
-                    print(f"[DEBUG] Processing OCR for page {idx+1}/{ocr_count}")
-                    progress_percent = int(10 + (idx / ocr_count) * 40)
-                    document_progress[doc_id] = ProgressEvent(
-                        stage="extracting",
-                        current=progress_percent,
-                        total=100,
-                        message=f"正在进行OCR识别 ({idx+1}/{ocr_count})...",
-                        document_id=doc_id
-                    )
-                    
-                    if page.image_base64:
-                        try:
-                            import base64
-                            from PIL import Image
-                            import io
+                logger.warning("[DOC] Document needs OCR but Baidu credentials not provided. Using local OCR fallback.")
+
+            for idx, page in enumerate(ocr_pages):
+                print(f"[DEBUG] Processing OCR for page {idx+1}/{ocr_count}")
+                progress_percent = int(10 + (idx / ocr_count) * 40)
+                document_progress[doc_id] = ProgressEvent(
+                    stage="extracting",
+                    current=progress_percent,
+                    total=100,
+                    message=f"正在进行OCR识别 ({idx+1}/{ocr_count})...",
+                    document_id=doc_id
+                )
+                
+                if page.image_base64:
+                    try:
+                        import base64
+                        from PIL import Image
+                        import io
+                        
+                        img_data = base64.b64decode(page.image_base64)
+                        with Image.open(io.BytesIO(img_data)) as img:
+                            width, height = img.size
+                            print(f"[DEBUG] Image size: {width}x{height}")
+                            pdf_width = width * 72 / 150
+                            pdf_height = height * 72 / 150
                             
-                            img_data = base64.b64decode(page.image_base64)
-                            with Image.open(io.BytesIO(img_data)) as img:
-                                width, height = img.size
-                                print(f"[DEBUG] Image size: {width}x{height}")
-                                pdf_width = width * 72 / 150
-                                pdf_height = height * 72 / 150
-                                
-                                print(f"[DEBUG] Calling Baidu OCR for page {page.page_number}")
-                                
-                                # 使用百度PP-OCR
-                                chunks = await baidu_ocr_gateway.process_image(
+                            print(f"[DEBUG] Starting OCR for page {page.page_number}")
+                            
+                            chunks = []
+
+                            # Prefer Baidu PP-OCR when possible; fallback to local OCR if auth fails or
+                            # if the provider returns no result.
+                            if not force_local_ocr:
+                                try:
+                                    chunks = await baidu_ocr_gateway.process_image(
+                                        page.image_base64,
+                                        page.page_number,
+                                        pdf_width,
+                                        pdf_height,
+                                        api_url=baidu_ocr_url,
+                                        token=baidu_ocr_token
+                                    )
+                                except PermissionError as e:
+                                    force_local_ocr = True
+                                    logger.error(f"[DOC] Baidu OCR auth failed: {e}. Falling back to local OCR.")
+                                except Exception as e:
+                                    logger.warning(f"[DOC] Baidu OCR failed: {e}. Falling back to local OCR for this page.")
+
+                            if force_local_ocr or not chunks:
+                                chunks = await local_ocr_gateway.process_image(
                                     page.image_base64,
                                     page.page_number,
                                     pdf_width,
-                                    pdf_height,
-                                    api_url=baidu_ocr_url,
-                                    token=baidu_ocr_token
+                                    pdf_height
                                 )
-                                print(f"[DEBUG] OCR returned {len(chunks)} chunks")
+
+                            print(f"[DEBUG] OCR returned {len(chunks)} chunks")
+                            
+                            # 更新页面内容
+                            if chunks:
+                                all_text = []
+                                all_coords = []
+                                for chunk in chunks:
+                                    all_text.append(chunk.text)
+                                    if chunk.bbox:
+                                        all_coords.append(chunk.bbox)
                                 
-                                # 更新页面内容
-                                if chunks:
-                                    all_text = []
-                                    all_coords = []
-                                    for chunk in chunks:
-                                        all_text.append(chunk.text)
-                                        if chunk.bbox:
-                                            all_coords.append(chunk.bbox)
-                                    
-                                    page.text = "\n".join(all_text)
-                                    page.coordinates = all_coords
-                                    page.confidence = 0.9
-                                    print(f"[DEBUG] Page {page.page_number} text length: {len(page.text)}")
-                                else:
-                                    print(f"[WARNING] OCR returned 0 chunks for page {page.page_number}")
-                        except Exception as e:
-                            print(f"[ERROR] OCR processing failed: {e}")
-                            import traceback
-                            traceback.print_exc()
+                                page.text = "\n".join(all_text)
+                                page.coordinates = all_coords
+                                page.confidence = 0.9
+                                print(f"[DEBUG] Page {page.page_number} text length: {len(page.text)}")
+                            else:
+                                print(f"[WARNING] OCR returned 0 chunks for page {page.page_number}")
+                    except Exception as e:
+                        print(f"[ERROR] OCR processing failed: {e}")
+                        import traceback
+                        traceback.print_exc()
         
         document_progress[doc_id] = ProgressEvent(
             stage="extracting",
@@ -153,6 +175,17 @@ async def process_document_async(
         
         chunk_count = await rag_engine.index_document(doc_id, pages, api_key)
         print(f"[DEBUG] Indexed {chunk_count} chunks for document {doc_id}")
+
+        if chunk_count == 0:
+            # This usually happens when the PDF is image-only and OCR failed/misconfigured.
+            document_progress[doc_id] = ProgressEvent(
+                stage="failed",
+                current=0,
+                total=100,
+                message="未能从文档中提取到可索引的文本内容：如果是扫描件，请配置可用的 OCR（或使用本地 OCR 回退）。",
+                document_id=doc_id
+            )
+            return
         
         document_progress[doc_id] = ProgressEvent(
             stage="embedding",

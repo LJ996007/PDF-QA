@@ -3,9 +3,11 @@
 """
 from fastapi import APIRouter, HTTPException
 import fitz
+import os
 
 from app.models.schemas import OCRResponse
-from app.services.ocr_gateway import ocr_gateway
+from app.services.baidu_ocr import baidu_ocr_gateway
+from app.services.local_ocr import local_ocr_gateway
 from app.services.rag_engine import rag_engine
 from app.routers.documents import documents
 
@@ -54,12 +56,36 @@ async def ocr_page(doc_id: str, page_num: int):
     if not target_page.image_base64:
         raise HTTPException(status_code=500, detail="图片数据不存在")
     
-    chunks = await ocr_gateway.process_image(
-        target_page.image_base64,
-        page_num,
-        page_width,
-        page_height
-    )
+    chunks = []
+
+    # Prefer Baidu OCR when configured; fallback to local OCR otherwise.
+    baidu_url = os.getenv("BAIDU_OCR_API_URL", "")
+    baidu_token = os.getenv("BAIDU_OCR_TOKEN", "")
+
+    if baidu_url and baidu_token:
+        try:
+            chunks = await baidu_ocr_gateway.process_image(
+                target_page.image_base64,
+                page_num,
+                page_width,
+                page_height,
+                api_url=baidu_url,
+                token=baidu_token,
+            )
+        except PermissionError:
+            chunks = await local_ocr_gateway.process_image(
+                target_page.image_base64,
+                page_num,
+                page_width,
+                page_height,
+            )
+    else:
+        chunks = await local_ocr_gateway.process_image(
+            target_page.image_base64,
+            page_num,
+            page_width,
+            page_height,
+        )
     
     # 索引OCR结果
     await rag_engine.index_ocr_result(
