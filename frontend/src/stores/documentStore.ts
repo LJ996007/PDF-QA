@@ -25,7 +25,7 @@ export interface TextChunk {
     content: string;
     page: number;
     bbox: BoundingBox;
-    source: 'native' | 'ocr';
+    source: 'native' | 'ocr' | 'vision';
 }
 
 export interface ComplianceItem {
@@ -75,6 +75,13 @@ export interface AppConfig {
     deepseekApiKey: string;
     theme: 'light' | 'dark';
     pdfScale: number;
+
+    // On-demand image understanding (OpenAI-compatible vision API)
+    visionEnabled: boolean;
+    visionBaseUrl: string;
+    visionApiKey: string;
+    visionModel: string;
+    visionMaxPages: number;
     // 提示词相关
     selectedPromptId: string;      // 当前选中的提示词ID
     customPrompts: PromptTemplate[]; // 用户自定义提示词列表
@@ -92,6 +99,11 @@ const DEFAULT_CONFIG: AppConfig = {
     deepseekApiKey: '',
     theme: 'light',
     pdfScale: 1.0,
+    visionEnabled: false,
+    visionBaseUrl: '',
+    visionApiKey: '',
+    visionModel: '',
+    visionMaxPages: 2,
     selectedPromptId: '', // Will be set by initializeConfig
     customPrompts: [],    // Will be set by initializeConfig
 };
@@ -165,6 +177,11 @@ const initializeConfig = (): AppConfig => {
             baiduOcrToken: '',
             theme: 'light',
             pdfScale: 1.0,
+            visionEnabled: false,
+            visionBaseUrl: '',
+            visionApiKey: '',
+            visionModel: '',
+            visionMaxPages: 2,
             selectedPromptId: examplePrompts[0].id,
             customPrompts: examplePrompts,
         };
@@ -185,12 +202,17 @@ const initializeConfig = (): AppConfig => {
                 baiduSecretKey: '',
                 ocrProvider: 'baidu',
                 baiduOcrUrl: '',
-                baiduOcrToken: '',
-                theme: 'light',
-                pdfScale: 1.0,
-                selectedPromptId: examplePrompts[0].id,
-                customPrompts: examplePrompts,
-            };
+                 baiduOcrToken: '',
+                 theme: 'light',
+                 pdfScale: 1.0,
+                 visionEnabled: false,
+                 visionBaseUrl: '',
+                 visionApiKey: '',
+                 visionModel: '',
+                 visionMaxPages: 2,
+                 selectedPromptId: examplePrompts[0].id,
+                 customPrompts: examplePrompts,
+             };
         }
 
         // 兼容旧版本：移除 isBuiltin 字段
@@ -227,12 +249,17 @@ const initializeConfig = (): AppConfig => {
             baiduSecretKey: '',
             ocrProvider: 'baidu',
             baiduOcrUrl: '',
-            baiduOcrToken: '',
-            theme: 'light',
-            pdfScale: 1.0,
-            selectedPromptId: examplePrompts[0].id,
-            customPrompts: examplePrompts,
-        };
+             baiduOcrToken: '',
+             theme: 'light',
+             pdfScale: 1.0,
+             visionEnabled: false,
+             visionBaseUrl: '',
+             visionApiKey: '',
+             visionModel: '',
+             visionMaxPages: 2,
+             selectedPromptId: examplePrompts[0].id,
+             customPrompts: examplePrompts,
+         };
     }
 };
 

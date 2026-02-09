@@ -32,7 +32,7 @@ class TextChunk(BaseModel):
     page_number: int
     content: str
     bbox: BoundingBox
-    source_type: Literal["native", "ocr"]
+    source_type: Literal["native", "ocr", "vision"]
     distance: Optional[float] = None
     ref_id: Optional[str] = None
     block_id: Optional[str] = None # Unique block ID for citation (e.g., b0001)
@@ -82,6 +82,14 @@ class ChatRequest(BaseModel):
     history: List[dict] = []
     zhipu_api_key: Optional[str] = None
     deepseek_api_key: Optional[str] = None
+
+    # Optional on-demand vision (image understanding) enrichment.
+    vision_enabled: bool = False
+    vision_api_key: Optional[str] = None
+    vision_base_url: Optional[str] = None
+    vision_model: Optional[str] = None
+    vision_max_pages: int = 2
+    vision_pages: Optional[List[int]] = None
 
 
 class ChatReference(BaseModel):

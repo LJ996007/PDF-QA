@@ -16,7 +16,15 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
     const [baiduOcrUrl, setBaiduOcrUrl] = useState(config.baiduOcrUrl || '');
     const [baiduOcrToken, setBaiduOcrToken] = useState(config.baiduOcrToken || '');
 
+    // Vision (image understanding) settings
+    const [visionEnabled, setVisionEnabled] = useState(!!config.visionEnabled);
+    const [visionBaseUrl, setVisionBaseUrl] = useState(config.visionBaseUrl || '');
+    const [visionApiKey, setVisionApiKey] = useState(config.visionApiKey || '');
+    const [visionModel, setVisionModel] = useState(config.visionModel || '');
+    const [visionMaxPages, setVisionMaxPages] = useState<number>(config.visionMaxPages || 2);
+
     // 折叠状态
+    const [isVisionExpanded, setIsVisionExpanded] = useState(false);
     const [isOcrExpanded, setIsOcrExpanded] = useState(false);
 
     const handleSave = () => {
@@ -26,6 +34,11 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
             ocrProvider: 'baidu',
             baiduOcrUrl: baiduOcrUrl,
             baiduOcrToken: baiduOcrToken,
+            visionEnabled: visionEnabled,
+            visionBaseUrl: visionBaseUrl,
+            visionApiKey: visionApiKey,
+            visionModel: visionModel,
+            visionMaxPages: Math.max(1, Number(visionMaxPages) || 2),
         });
         onClose();
     };
@@ -89,6 +102,88 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                             onChange={(e) => setDeepseekKey(e.target.value)}
                             placeholder="sk-xxxxxxxx（可选）"
                         />
+                    </div>
+
+                    {/* Vision 设置 - 可折叠 */}
+                    <div className="setting-section">
+                        <button
+                            className="section-toggle"
+                            onClick={() => setIsVisionExpanded(!isVisionExpanded)}
+                        >
+                            <span className="section-title">
+                                🖼️ 图片理解 (Vision)
+                                <span className="section-badge">
+                                    {visionEnabled ? '已启用' : '未启用'}
+                                </span>
+                            </span>
+                            <span className={`toggle-icon ${isVisionExpanded ? 'expanded' : ''}`}>
+                                ▶
+                            </span>
+                        </button>
+
+                        {isVisionExpanded && (
+                            <div className="section-content">
+                                <div className="setting-group">
+                                    <label className="setting-label">启用图片理解</label>
+                                    <input
+                                        type="checkbox"
+                                        checked={visionEnabled}
+                                        onChange={(e) => setVisionEnabled(e.target.checked)}
+                                    />
+                                    <span className="setting-hint" style={{ marginTop: '6px' }}>
+                                        开启后，提问时后端会按需渲染页面截图并调用 OpenAI 兼容的视觉模型生成“视觉摘要”。
+                                    </span>
+                                </div>
+
+                                <div className="setting-group">
+                                    <label className="setting-label">Base URL</label>
+                                    <input
+                                        type="text"
+                                        className="setting-input"
+                                        value={visionBaseUrl}
+                                        onChange={(e) => setVisionBaseUrl(e.target.value)}
+                                        placeholder="https://your-host (可含 /v1)"
+                                    />
+                                </div>
+
+                                <div className="setting-group">
+                                    <label className="setting-label">API Key</label>
+                                    <input
+                                        type="password"
+                                        className="setting-input"
+                                        value={visionApiKey}
+                                        onChange={(e) => setVisionApiKey(e.target.value)}
+                                        placeholder="sk-..."
+                                    />
+                                </div>
+
+                                <div className="setting-group">
+                                    <label className="setting-label">Model</label>
+                                    <input
+                                        type="text"
+                                        className="setting-input"
+                                        value={visionModel}
+                                        onChange={(e) => setVisionModel(e.target.value)}
+                                        placeholder="gpt-4o-mini / qwen2-vl-..."
+                                    />
+                                </div>
+
+                                <div className="setting-group">
+                                    <label className="setting-label">每次最多分析页数</label>
+                                    <input
+                                        type="number"
+                                        className="setting-input"
+                                        value={visionMaxPages}
+                                        min={1}
+                                        max={10}
+                                        onChange={(e) => {
+                                            const v = parseInt(e.target.value || '2', 10);
+                                            setVisionMaxPages(Number.isFinite(v) ? Math.max(1, v) : 2);
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                     {/* OCR 设置 - 可折叠 */}

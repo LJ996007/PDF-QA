@@ -12,6 +12,7 @@ export interface ChatStreamEvent {
         ref_id: string;
         chunk_id: string;
         page: number;
+        source?: 'native' | 'ocr' | 'vision';
         bbox: {
             page: number;
             x: number;
@@ -73,6 +74,11 @@ export function useVectorSearch() {
                     history: [],
                     zhipu_api_key: config.zhipuApiKey,
                     deepseek_api_key: config.deepseekApiKey,
+                    vision_enabled: config.visionEnabled,
+                    vision_base_url: config.visionBaseUrl,
+                    vision_api_key: config.visionApiKey,
+                    vision_model: config.visionModel,
+                    vision_max_pages: config.visionMaxPages,
                 }),
             });
 
@@ -112,7 +118,7 @@ export function useVectorSearch() {
                                     content: ref.content,
                                     page: ref.page,
                                     bbox: ref.bbox,
-                                    source: 'native' as const,
+                                    source: (ref.source ?? 'native') as TextChunk['source'],
                                 }));
 
                                 updateMessage(assistantMessageId, { references });

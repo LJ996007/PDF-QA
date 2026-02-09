@@ -7,13 +7,24 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from app.models.schemas import ChatRequest, TextChunk
+from app.models.schemas import ChatRequest, TextChunk, BoundingBox
 from app.services.rag_engine import rag_engine
 from app.services.llm_router import llm_router
 from app.routers.documents import documents
+from app.services.pdf_render import render_pdf_page_to_png_base64
+from app.services.vision_gateway import describe_page_image
+from app.services.vision_utils import select_candidate_pages
 
 
 router = APIRouter()
+
+VISION_PROMPT_V1 = """你将看到一页 PDF 的截图（可能包含图表/流程图/示意图/图片/表格）。请只基于图片内容，输出简洁、可检索的中文要点摘要。
+要求：
+1. 只描述你能从图中确认的内容，不要编造；不确定就明确说不确定。
+2. 如果是图表：说明图的主题、坐标轴/图例含义、趋势/对比结论；若能清晰读到关键数值可列出 3-8 个。
+3. 如果是流程图/示意图：说明主要模块/步骤及它们的关系。
+4. 如果这页没有有意义的非文字视觉信息（只有普通段落文字），只输出“无”。
+输出格式：最多 10 条项目符号（- 开头）。"""
 
 
 @router.post("/chat")
@@ -43,7 +54,71 @@ async def chat(request: ChatRequest):
                 "content": f"正在检索相关内容...找到 {len(chunks)} 个相关片段"
             })
         }
-        
+
+        # Optional: on-demand vision enrichment (adds extra citeable chunks)
+        if getattr(request, "vision_enabled", False):
+            doc = documents.get(doc_id, {})
+            file_path = doc.get("file_path")
+            total_pages = doc.get("total_pages")
+            vision_cache = doc.setdefault("vision_cache", {})
+
+            candidate_pages = select_candidate_pages(
+                explicit_pages=request.vision_pages,
+                chunk_pages=[getattr(c, "page_number", 0) for c in chunks],
+                max_pages=getattr(request, "vision_max_pages", 2),
+                total_pages=total_pages,
+            )
+
+            if file_path:
+                next_ref_index = len(chunks) + 1
+                for i, page_num in enumerate(candidate_pages):
+                    page_num = int(page_num)
+                    cache_key = f"v1|{request.vision_model}|p{page_num}"
+                    vision_text = vision_cache.get(cache_key)
+                    page_w_pt = 100.0
+                    page_h_pt = 100.0
+
+                    if not vision_text:
+                        try:
+                            img_b64, page_w_pt, page_h_pt = render_pdf_page_to_png_base64(
+                                file_path, page_num, dpi=150
+                            )
+                            vision_text = await describe_page_image(
+                                image_b64_png=img_b64,
+                                prompt=VISION_PROMPT_V1,
+                                api_key=request.vision_api_key,
+                                base_url=request.vision_base_url,
+                                model=request.vision_model,
+                                timeout_s=90.0,
+                            )
+                            vision_cache[cache_key] = vision_text
+                        except Exception:
+                            continue
+                    else:
+                        # We still want a correct page bbox; best-effort.
+                        try:
+                            _img_b64, page_w_pt, page_h_pt = render_pdf_page_to_png_base64(
+                                file_path, page_num, dpi=72
+                            )
+                        except Exception:
+                            pass
+
+                    if not vision_text:
+                        continue
+
+                    chunks.append(
+                        TextChunk(
+                            id=f"vision_{doc_id}_p{page_num}_{i}",
+                            document_id=doc_id,
+                            page_number=page_num,
+                            content=f"[视觉摘要]\\n{vision_text}",
+                            bbox=BoundingBox(page=page_num, x=0.0, y=0.0, w=float(page_w_pt), h=float(page_h_pt)),
+                            source_type="vision",
+                            distance=0.0,
+                            ref_id=f"ref-{next_ref_index + i}",
+                        )
+                    )
+
         # 发送检索到的引用信息
         refs_data = [
             {
@@ -51,6 +126,7 @@ async def chat(request: ChatRequest):
                 "chunk_id": chunk.id,
                 "page": chunk.page_number,
                 "bbox": chunk.bbox.model_dump(),
+                "source": chunk.source_type,
                 "content": chunk.content[:100] + "..." if len(chunk.content) > 100 else chunk.content
             }
             for chunk in chunks
