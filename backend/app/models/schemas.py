@@ -1,24 +1,28 @@
+﻿"""
+Pydantic data models.
 """
-Pydantic数据模型定义
-"""
-from pydantic import BaseModel, Field
-from typing import Optional, List, Literal
+
 from datetime import datetime
+from typing import Dict, List, Literal, Optional
+
+from pydantic import BaseModel, Field
 
 
 class BoundingBox(BaseModel):
-    """PDF坐标边界框"""
-    page: int = Field(..., description="页码（1-indexed）")
-    x: float = Field(..., description="左下角x坐标")
-    y: float = Field(..., description="左下角y坐标")
-    w: float = Field(..., description="宽度")
-    h: float = Field(..., description="高度")
+    """PDF coordinate bounding box."""
+
+    page: int = Field(..., description="Page number (1-indexed)")
+    x: float = Field(..., description="Left x")
+    y: float = Field(..., description="Top y")
+    w: float = Field(..., description="Width")
+    h: float = Field(..., description="Height")
 
 
 class PageContent(BaseModel):
-    """页面内容"""
+    """Page content."""
+
     page_number: int
-    type: Literal["native", "ocr"] = Field(..., description="内容类型：原生文本或OCR")
+    type: Literal["native", "ocr"] = Field(..., description="native text or OCR")
     text: str = ""
     coordinates: Optional[List[BoundingBox]] = None
     confidence: float = 1.0
@@ -26,7 +30,8 @@ class PageContent(BaseModel):
 
 
 class TextChunk(BaseModel):
-    """文本块（用于RAG检索）"""
+    """Chunk for retrieval."""
+
     id: str
     document_id: str
     page_number: int
@@ -35,57 +40,72 @@ class TextChunk(BaseModel):
     source_type: Literal["native", "ocr"]
     distance: Optional[float] = None
     ref_id: Optional[str] = None
-    block_id: Optional[str] = None # Unique block ID for citation (e.g., b0001)
+    block_id: Optional[str] = None
 
 
 class Document(BaseModel):
-    """文档信息"""
+    """Document metadata."""
+
     id: str
     name: str
     total_pages: int
     upload_time: datetime
     processing_status: Literal["extracting", "embedding", "completed", "failed"]
-    ocr_required_pages: List[int] = []
-    thumbnail_urls: List[str] = []
+    ocr_required_pages: List[int] = Field(default_factory=list)
+    recognized_pages: List[int] = Field(default_factory=list)
+    page_ocr_status: Dict[int, Literal["unrecognized", "processing", "recognized", "failed"]] = Field(default_factory=dict)
+    ocr_mode: Literal["manual", "full"] = "manual"
+    thumbnail_urls: List[str] = Field(default_factory=list)
 
 
 class DocumentUploadResponse(BaseModel):
-    """文档上传响应"""
+    """Upload response."""
+
     document_id: str
     status: str
     total_pages: int
     ocr_required_pages: List[int]
     progress_url: str
+    ocr_mode: Literal["manual", "full"] = "manual"
 
 
 class OCRRequest(BaseModel):
-    """OCR请求"""
+    """OCR request."""
+
     page_number: int
 
 
 class OCRChunk(BaseModel):
-    """OCR结果块"""
+    """OCR chunk."""
+
     text: str
     bbox: BoundingBox
 
 
 class OCRResponse(BaseModel):
-    """OCR响应"""
+    """OCR response."""
+
     page: int
     chunks: List[OCRChunk]
+    status: Literal["recognized", "already_recognized", "processing"] = "recognized"
+    already_recognized: bool = False
+    message: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
-    """对话请求"""
+    """Chat request."""
+
     document_id: str
     question: str
-    history: List[dict] = []
+    history: List[dict] = Field(default_factory=list)
     zhipu_api_key: Optional[str] = None
     deepseek_api_key: Optional[str] = None
+    allowed_pages: List[int] = Field(default_factory=list)
 
 
 class ChatReference(BaseModel):
-    """对话引用"""
+    """Chat citation."""
+
     ref_id: str
     chunk_id: str
     page: int
@@ -94,17 +114,19 @@ class ChatReference(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    """对话消息"""
+    """Chat message."""
+
     id: str
     document_id: str
     role: Literal["user", "assistant"]
     content: str
-    references: List[ChatReference] = []
+    references: List[ChatReference] = Field(default_factory=list)
     timestamp: datetime
 
 
 class ProgressEvent(BaseModel):
-    """进度事件"""
+    """Progress event for SSE."""
+
     stage: Literal["extracting", "embedding", "ocr", "completed", "failed"]
     current: int
     total: int

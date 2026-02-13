@@ -489,3 +489,56 @@ body {
   background: #bfdbfe;
   color: var(--text-primary);
 }
+
+.upload-choice-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.upload-choice-modal {
+  width: min(90vw, 420px);
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: var(--shadow-xl);
+  border: 1px solid var(--border-color);
+  padding: 20px;
+}
+
+.upload-choice-modal h3 {
+  font-size: 18px;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.upload-choice-modal p {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+}
+
+.upload-choice-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.upload-choice-actions button {
+  border: 1px solid var(--border-color);
+  background: #fff;
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.upload-choice-actions button:first-child {
+  background: var(--primary-color);
+  border-color: var(--primary-color);
+  color: #fff;
+}

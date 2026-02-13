@@ -1,9 +1,10 @@
-"""
-RAG引擎 - ChromaDB向量检索
+﻿"""
+RAG寮曟搸 - ChromaDB鍚戦噺妫€绱?
 """
 import chromadb
 from chromadb.config import Settings
 import hashlib
+import logging
 import os
 import re
 import json
@@ -12,6 +13,8 @@ import httpx
 
 
 from app.models.schemas import TextChunk, PageContent, BoundingBox
+
+logger = logging.getLogger(__name__)
 
 try:
     from rank_bm25 import BM25Okapi
@@ -23,7 +26,7 @@ except ImportError:
 
 
 class RAGEngine:
-    """RAG检索引擎，基于ChromaDB"""
+    """RAG妫€绱㈠紩鎿庯紝鍩轰簬ChromaDB"""
     
     def __init__(self, persist_directory: str = "./chroma_db"):
         self.client = chromadb.PersistentClient(
@@ -31,7 +34,7 @@ class RAGEngine:
             settings=Settings(anonymized_telemetry=False)
         )
         self.collection = self.client.get_or_create_collection(
-            name="documents_v3",  # 使用v3集合以确保全新的维度(2048)
+            name="documents_v3",  # 浣跨敤v3闆嗗悎浠ョ‘淇濆叏鏂扮殑缁村害(2048)
             metadata={"hnsw:space": "cosine"}
         )
 
@@ -40,12 +43,12 @@ class RAGEngine:
     
     async def _get_embeddings(self, texts: List[str], api_key: Optional[str] = None) -> List[List[float]]:
         """
-        获取文本向量（使用智谱API）
+        鑾峰彇鏂囨湰鍚戦噺锛堜娇鐢ㄦ櫤璋盇PI锛?
         """
         final_api_key = api_key or self.zhipu_api_key
         
         if not final_api_key:
-            # 如果没有API Key，使用简单的哈希向量（仅用于测试）
+            # 濡傛灉娌℃湁API Key锛屼娇鐢ㄧ畝鍗曠殑鍝堝笇鍚戦噺锛堜粎鐢ㄤ簬娴嬭瘯锛?
             return [self._simple_hash_embedding(text) for text in texts]
         
         headers = {
@@ -55,7 +58,7 @@ class RAGEngine:
         
         embeddings = []
         
-        # 批量处理，每次最多10个
+        # 鎵归噺澶勭悊锛屾瘡娆℃渶澶?0涓?
         for i in range(0, len(texts), 10):
             batch = texts[i:i+10]
             
@@ -85,10 +88,10 @@ class RAGEngine:
         return embeddings
     
     def _simple_hash_embedding(self, text: str, dim: int = 2048) -> List[float]:
-        """简单哈希向量（用于测试，无API Key时）"""
+        """绠€鍗曞搱甯屽悜閲忥紙鐢ㄤ簬娴嬭瘯锛屾棤API Key鏃讹級"""
         import hashlib
         hash_bytes = hashlib.sha256(text.encode()).digest()
-        # 扩展到指定维度
+        # 鎵╁睍鍒版寚瀹氱淮搴?
         embedding = []
         for i in range(dim):
             byte_idx = i % len(hash_bytes)
@@ -163,7 +166,7 @@ class RAGEngine:
     
     def _chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
         """
-        文本切分
+        鏂囨湰鍒囧垎
         """
         if len(text) <= chunk_size:
             return [text] if text.strip() else []
@@ -174,9 +177,9 @@ class RAGEngine:
         while start < len(text):
             end = start + chunk_size
             
-            # 尝试在句子结尾处切分
+            # 灏濊瘯鍦ㄥ彞瀛愮粨灏惧鍒囧垎
             if end < len(text):
-                # 找最近的句号、换行等
+                # 鎵炬渶杩戠殑鍙ュ彿銆佹崲琛岀瓑
                 for sep in ["\n\n", "。", ".", "\n", "；", ";", "，", ","]:
                     last_sep = text[start:end].rfind(sep)
                     if last_sep > chunk_size // 2:
@@ -193,25 +196,25 @@ class RAGEngine:
     
     async def index_document(self, doc_id: str, pages: List[PageContent], api_key: Optional[str] = None) -> int:
         """
-        建立文档索引
-        返回: 索引的chunk数量
+        寤虹珛鏂囨。绱㈠紩
+        杩斿洖: 绱㈠紩鐨刢hunk鏁伴噺
         """
         all_chunks = []
         all_ids = []
         all_metadatas = []
         
-        # 全局 chunk 计数器 (用于生成 b0001)
+        # 鍏ㄥ眬 chunk 璁℃暟鍣?(鐢ㄤ簬鐢熸垚 b0001)
         global_chunk_count = 0
 
         for page in pages:
             if not page.text:
                 continue
                 
-            # 检查是否有OCR坐标数据
+            # 妫€鏌ユ槸鍚︽湁OCR鍧愭爣鏁版嵁
             has_coords = page.coordinates and len(page.coordinates) > 0
             
             if has_coords:
-                # 有精确坐标（OCR或原生文本），按行/块索引
+                # 鏈夌簿纭潗鏍囷紙OCR鎴栧師鐢熸枃鏈級锛屾寜琛?鍧楃储寮?
                 text_lines = page.text.split('\n')
                 # Build (text, bbox) entries first (skip OCR noise), then merge consecutive
                 # lines into slightly larger chunks for better retrieval quality.
@@ -221,7 +224,7 @@ class RAGEngine:
                     if not text or self._is_low_value_text(text):
                         continue
 
-                    # 获取对应的坐标
+                    # 鑾峰彇瀵瑰簲鐨勫潗鏍?
                     if idx < len(page.coordinates):
                         coord = page.coordinates[idx]
                         bbox_x = coord.x if hasattr(coord, 'x') else coord.get('x', 50)
@@ -229,7 +232,7 @@ class RAGEngine:
                         bbox_w = coord.w if hasattr(coord, 'w') else coord.get('w', 400)
                         bbox_h = coord.h if hasattr(coord, 'h') else coord.get('h', 30)
                     else:
-                        # 没有坐标时使用估算
+                        # 娌℃湁鍧愭爣鏃朵娇鐢ㄤ及绠?
                         bbox_x = 50
                         bbox_y = (1.0 - idx / max(len(text_lines), 1)) * 700
                         bbox_w = 500
@@ -313,7 +316,7 @@ class RAGEngine:
 
                 flush_current()
             else:
-                # 无精确坐标：按段落切分
+                # 鏃犵簿纭潗鏍囷細鎸夋钀藉垏鍒?
                 text_chunks = self._chunk_text(page.text)
 
                 for idx, chunk_text in enumerate(text_chunks):
@@ -341,10 +344,10 @@ class RAGEngine:
         if not all_chunks:
             return 0
         
-        # 获取向量
+        # 鑾峰彇鍚戦噺
         embeddings = await self._get_embeddings(all_chunks, api_key)
         
-        # 存入ChromaDB
+        # 瀛樺叆ChromaDB
         self.collection.add(
             ids=all_ids,
             embeddings=embeddings,
@@ -354,7 +357,7 @@ class RAGEngine:
         
         print(f"[RAG] Indexed {len(all_chunks)} chunks, first bbox: {all_metadatas[0] if all_metadatas else 'N/A'}")
         
-        # 失效缓存
+        # 澶辨晥缂撳瓨
         self._invalidate_bm25_cache(doc_id)
         
         return len(all_chunks)
@@ -367,7 +370,7 @@ class RAGEngine:
         api_key: Optional[str] = None
     ) -> int:
         """
-        索引OCR结果
+        绱㈠紩OCR缁撴灉
         """
         all_chunks = []
         all_ids = []
@@ -410,13 +413,13 @@ class RAGEngine:
 
 
     def _tokenize(self, text: str) -> List[str]:
-        """使用jieba进行中文分词"""
+        """浣跨敤jieba杩涜涓枃鍒嗚瘝"""
         if not HAS_BM25:
             return text.split()
         return list(jieba.cut_for_search(text))
 
     def _ensure_bm25_index(self, doc_id: str):
-        """确保文档的BM25索引已构建"""
+        """纭繚鏂囨。鐨凚M25绱㈠紩宸叉瀯寤"""
         if not HAS_BM25:
             return
 
@@ -424,7 +427,7 @@ class RAGEngine:
             return
 
         print(f"[Hybrid] Building BM25 index for {doc_id}...")
-        # 1. 从ChromaDB获取文档所有分块
+        # 1. 浠嶤hromaDB鑾峰彇鏂囨。鎵€鏈夊垎鍧?
         try:
             results = self.collection.get(
                 where={"doc_id": doc_id},
@@ -443,10 +446,10 @@ class RAGEngine:
             ids = results["ids"]
             texts = results["documents"]
             
-            # 2. 分词
+            # 2. 鍒嗚瘝
             tokenized_corpus = [self._tokenize(doc) for doc in texts]
             
-            # 3. 构建索引
+            # 3. 鏋勫缓绱㈠紩
             bm25 = BM25Okapi(tokenized_corpus)
             
             self.bm25_cache[doc_id] = {
@@ -462,28 +465,40 @@ class RAGEngine:
             traceback.print_exc()
 
     def _invalidate_bm25_cache(self, doc_id: str):
-        """失效BM25缓存"""
+        """澶辨晥BM25缂撳瓨"""
         if doc_id in self.bm25_cache:
             del self.bm25_cache[doc_id]
             print(f"[Hybrid] Cache invalidated for {doc_id}")
 
     async def retrieve(
-        self, 
-        query: str, 
-        doc_id: str, 
+        self,
+        query: str,
+        doc_id: str,
         top_k: int = 5,
-        api_key: Optional[str] = None
+        api_key: Optional[str] = None,
+        allowed_pages: Optional[List[int]] = None,
+        ensure_page_coverage: bool = False,
     ) -> List[TextChunk]:
         """
-        检索相关文本块
+        妫€绱㈢浉鍏虫枃鏈潡
         """
-        # 获取查询向量
+        allowed_page_set = set(allowed_pages or [])
+        allowed_page_list = sorted(allowed_page_set)
+        coverage_enabled = ensure_page_coverage and bool(allowed_page_set) and len(allowed_page_set) <= 20
+        if allowed_pages is not None and not allowed_page_set:
+            return []
+        if coverage_enabled and len(allowed_page_list) > top_k:
+            message = f"page_coverage_limited doc_id={doc_id} allowed_pages={len(allowed_page_list)} top_k={top_k}"
+            print(message, flush=True)
+            logger.info(message)
+
+        # 鑾峰彇鏌ヨ鍚戦噺
         query_embedding = (await self._get_embeddings([query], api_key))[0]
-        
-        # 检索
-        # 混合检索实现 (RRF Fusion)
-        
-        # 1. 向量检索 (Vector Search)
+
+        # 妫€绱?
+        # 娣峰悎妫€绱㈠疄鐜?(RRF Fusion)
+
+        # 1. 鍚戦噺妫€绱?(Vector Search)
         # Get enough candidates so we can filter OCR noise and still return top_k results.
         k_vector = max(top_k * 10, 50)
         vector_results = self.collection.query(
@@ -491,72 +506,76 @@ class RAGEngine:
             where={"doc_id": doc_id},
             n_results=k_vector
         )
-        
-        # 2. 关键词检索 (BM25 Search)
-        # 确保索引存在
+
+        # 2. 鍏抽敭璇嶆绱?(BM25 Search)
+        # 纭繚绱㈠紩瀛樺湪
         self._ensure_bm25_index(doc_id)
-        
+
         bm25_top_n = []
         if HAS_BM25 and doc_id in self.bm25_cache:
             cache = self.bm25_cache[doc_id]
             bm25 = cache["model"]
             doc_ids = cache["ids"]
-            
+
             if bm25:
                 tokenized_query = self._tokenize(query)
-                # 获取所有分数
+                # 鑾峰彇鎵€鏈夊垎鏁?
                 doc_scores = bm25.get_scores(tokenized_query)
-                
-                # 获取Top N的索引
-                # argsort是升序，所以取最后k个并反转
+
+                # 鑾峰彇Top N鐨勭储寮?
+                # argsort鏄崌搴忥紝鎵€浠ュ彇鏈€鍚巏涓苟鍙嶈浆
                 import numpy as np
                 top_indices = np.argsort(doc_scores)[-k_vector:][::-1]
-                
+
                 for idx in top_indices:
-                    if doc_scores[idx] > 0: # 只保留有匹配项的结果
+                    if doc_scores[idx] > 0:  # 鍙繚鐣欐湁鍖归厤椤圭殑缁撴灉
                         bm25_top_n.append(doc_ids[idx])
-        
-        # 3. RRF融合 (Reciprocal Rank Fusion)
+
+        # 3. RRF铻嶅悎 (Reciprocal Rank Fusion)
         # Score = 1 / (k + rank)
         rrf_k = 60
-        final_scores = {} # {chunk_id: score}
-        
-        # 处理向量结果
+        final_scores = {}  # {chunk_id: score}
+
+        # 澶勭悊鍚戦噺缁撴灉
         if vector_results["ids"] and vector_results["ids"][0]:
             for rank, chunk_id in enumerate(vector_results["ids"][0]):
                 final_scores[chunk_id] = final_scores.get(chunk_id, 0) + (1 / (rrf_k + rank + 1))
-        
-        # 处理BM25结果
+
+        # 澶勭悊BM25缁撴灉
         for rank, chunk_id in enumerate(bm25_top_n):
-             final_scores[chunk_id] = final_scores.get(chunk_id, 0) + (1 / (rrf_k + rank + 1))
-             
-        # 4. 排序并获取Chunk详情
-        # 按分数降序
+            final_scores[chunk_id] = final_scores.get(chunk_id, 0) + (1 / (rrf_k + rank + 1))
+
+        # 4. 鎺掑簭骞惰幏鍙朇hunk璇︽儏
+        # 鎸夊垎鏁伴檷搴?
         candidate_ids = sorted(final_scores.keys(), key=lambda x: final_scores[x], reverse=True)
-        
+
         if not candidate_ids:
             return []
-            
-        # 批量获取Chunk详情
-        # ChromaDB .get() 
+
+        # 鎵归噺鑾峰彇Chunk璇︽儏
+        # ChromaDB .get()
         candidate_limit = max(top_k * 20, 200)
         candidate_ids = candidate_ids[:candidate_limit]
         final_chunks_data = self.collection.get(
             ids=candidate_ids,
             include=["documents", "metadatas"]
         )
-        
-        # 构建返回对象，需要按candidate_ids的顺序
+
+        # 鏋勫缓杩斿洖瀵硅薄锛岄渶瑕佹寜candidate_ids鐨勯『搴?
         id_map = {id_: i for i, id_ in enumerate(final_chunks_data["ids"])}
-        
-        chunks = []
+
+        candidate_chunks: List[TextChunk] = []
         for chunk_id in candidate_ids:
             if chunk_id not in id_map:
                 continue
-                
+
             idx = id_map[chunk_id]
             metadata = final_chunks_data["metadatas"][idx]
             content = final_chunks_data["documents"][idx]
+            page_number = metadata["page"]
+
+            if allowed_page_set and page_number not in allowed_page_set:
+                continue
 
             if self._is_low_value_text(content):
                 continue
@@ -583,32 +602,69 @@ class RAGEngine:
                         bbox_y = float(b["y"])
                         bbox_w = float(b["w"])
                         bbox_h = float(b["h"])
-            
-            chunks.append(TextChunk(
+
+            candidate_chunks.append(TextChunk(
                 id=chunk_id,
                 document_id=doc_id,
-                page_number=metadata["page"],
+                page_number=page_number,
                 content=content,
                 bbox=BoundingBox(
-                    page=metadata["page"],
+                    page=page_number,
                     x=bbox_x,
                     y=bbox_y,
                     w=bbox_w,
                     h=bbox_h
                 ),
                 source_type=metadata["source"],
-                distance=0, # Hybrid search score makes distance confusing, setting to 0 or could set to 1/score
-                ref_id=f"ref-{len(chunks)+1}",
+                distance=0,  # Hybrid search score makes distance confusing, setting to 0 or could set to 1/score
+                ref_id=None,
                 block_id=metadata.get("block_id")
             ))
 
-            if len(chunks) >= top_k:
+            if len(candidate_chunks) >= candidate_limit:
                 break
-            
+
+        if not candidate_chunks:
+            return []
+
+        if coverage_enabled:
+            best_by_page = {}
+            for chunk in candidate_chunks:
+                if chunk.page_number not in best_by_page:
+                    best_by_page[chunk.page_number] = chunk
+
+            selected_chunks: List[TextChunk] = []
+            selected_ids = set()
+
+            for page_num in allowed_page_list:
+                page_chunk = best_by_page.get(page_num)
+                if not page_chunk:
+                    continue
+                selected_chunks.append(page_chunk)
+                selected_ids.add(page_chunk.id)
+                if len(selected_chunks) >= top_k:
+                    break
+
+            if len(selected_chunks) < top_k:
+                for chunk in candidate_chunks:
+                    if chunk.id in selected_ids:
+                        continue
+                    selected_chunks.append(chunk)
+                    selected_ids.add(chunk.id)
+                    if len(selected_chunks) >= top_k:
+                        break
+
+            chunks = selected_chunks[:top_k]
+        else:
+            chunks = candidate_chunks[:top_k]
+
+        for idx, chunk in enumerate(chunks):
+            chunk.ref_id = f"ref-{idx + 1}"
+
         return chunks
-    
+
     def delete_document(self, doc_id: str):
-        """删除文档的所有索引"""
+        """鍒犻櫎鏂囨。鐨勬墍鏈夌储寮"""
         try:
             self.collection.delete(where={"doc_id": doc_id})
             self._invalidate_bm25_cache(doc_id)
@@ -616,5 +672,9 @@ class RAGEngine:
             pass
 
 
-# 全局实例
+# 鍏ㄥ眬瀹炰緥
 rag_engine = RAGEngine()
+
+
+
+
