@@ -45,7 +45,7 @@ class MarkdownErrorBoundary extends React.Component<MarkdownErrorBoundaryProps, 
 }
 
 export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
-    const { focusReference } = useDocumentStore();
+    const { setHighlights, setCurrentPage } = useDocumentStore();
     const [isRefsExpanded, setIsRefsExpanded] = React.useState(false);
     const validRefIds = React.useMemo(
         () => new Set(message.references.map((ref) => ref.refId)),
@@ -58,9 +58,11 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
         if (!ref) {
             return false;
         }
-        focusReference(ref, 'chat');
+
+        setHighlights([ref]);
+        setCurrentPage(ref.page);
         return true;
-    }, [focusReference, message.references]);
+    }, [message.references, setCurrentPage, setHighlights]);
 
     const handleMissingRef = React.useCallback(() => {
         window.alert('未找到对应引用，请先展开“引用来源”核对后再定位。');
@@ -78,7 +80,9 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
         }
     }, [handleMissingRef, jumpToReference]);
 
+    // 渲染带引用标记的内容
     const renderPlainContentWithRefs = (content: string) => {
+        // 匹配 [ref-N] 格式
         const parts = content.split(/(\[ref-\d+\])/g);
 
         return parts.map((part, index) => {
@@ -95,7 +99,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
                     </span>
                 );
             }
-
             return <span key={index}>{part}</span>;
         });
     };
@@ -109,6 +112,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
     return (
         <div className={`message-item ${message.role}`}>
             <div className={`message-bubble ${message.isStreaming ? 'streaming' : ''}`}>
+                {/* 消息内容 */}
                 {message.role === 'assistant' ? (
                     message.isStreaming ? (
                         <div className="message-content plain-content streaming-content">
@@ -129,6 +133,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
                     <div className="message-content plain-content">{message.content}</div>
                 )}
 
+                {/* 引用列表 */}
                 {message.role === 'assistant' && message.references.length > 0 && !message.isStreaming && (
                     <div className="references-list">
                         <div
@@ -137,7 +142,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
                             style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
                         >
                             <span>{isRefsExpanded ? '▼' : '▶'}</span>
-                            <span>{`引用来源 (${message.references.length})`}</span>
+                            <span>📚 引用来源 ({message.references.length})</span>
                         </div>
 
                         {isRefsExpanded && message.references.map((ref) => (
@@ -149,7 +154,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
                                 <span className="ref-badge">{ref.refId.replace('ref-', '')}</span>
                                 <div>
                                     <div className="ref-content">{ref.content}</div>
-                                    <div className="ref-page">{`第 ${ref.page} 页`}</div>
+                                    <div className="ref-page">第 {ref.page} 页</div>
                                 </div>
                             </div>
                         ))}
@@ -159,4 +164,3 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
         </div>
     );
 };
-

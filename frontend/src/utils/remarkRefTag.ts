@@ -15,8 +15,7 @@ function createTextNode(value: string): MarkdownNode {
 function createRefNode(refNumber: string): MarkdownNode {
     return {
         type: 'link',
-        // Use a relative URL so ReactMarkdown default url sanitizer keeps it.
-        url: `/__ref__/${refNumber}`,
+        url: `ref://${refNumber}`,
         title: `ref-${refNumber}`,
         children: [createTextNode(`[ref-${refNumber}]`)],
     };
@@ -90,3 +89,4 @@ export function remarkRefTag() {
         tree.children = transformNodes(tree.children);
     };
 }
+

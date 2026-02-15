@@ -2,69 +2,70 @@ import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useDocumentStore } from '../../stores/documentStore';
-import type { TextChunk } from '../../stores/documentStore';
+import type { BoundingBox, TextChunk } from '../../stores/documentStore';
 import './CompliancePanel.css';
 
 interface CompliancePanelProps {
     className?: string;
 }
 
-type BackendReference = TextChunk & {
+type CompatTextChunk = TextChunk & {
     page_number?: number;
     ref_id?: string;
+};
+
+const createFallbackBbox = (page: number): BoundingBox => ({
+    page,
+    x: 0,
+    y: 0,
+    w: 100,
+    h: 20,
+});
+
+const getRefPage = (ref: CompatTextChunk): number | undefined => {
+    return ref.page_number ?? ref.bbox?.page ?? ref.page;
+};
+
+const getRefId = (ref: CompatTextChunk): string => {
+    return ref.refId || ref.ref_id || '';
+};
+
+const toHighlightRef = (ref: CompatTextChunk, page: number): TextChunk => {
+    return {
+        ...ref,
+        refId: getRefId(ref),
+        page,
+        bbox: ref.bbox ?? createFallbackBbox(page),
+        source: ref.source ?? 'native',
+    };
 };
 
 export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) => {
     const {
         currentDocument,
         config,
-        focusReference,
-        focusPage,
+        setHighlights,
+        setCurrentPage,
+        // 新增：合规性状态和操作
         complianceResults,
         complianceMarkdown,
         complianceRequirements,
         setComplianceResults,
-        setComplianceRequirements,
+        setComplianceRequirements
     } = useDocumentStore();
 
     const currentDocumentId = currentDocument?.id;
-    const recognizedPages = currentDocument?.recognizedPages || [];
-    const canRunCompliance = Boolean(currentDocumentId && recognizedPages.length > 0);
     const apiBaseUrl = config.apiBaseUrl || 'http://localhost:8000';
 
+    // 移除本地 state，改用 store state
     const [loading, setLoading] = useState(false);
 
-    const getRefPage = (ref: BackendReference): number => {
-        return ref.page_number || ref.page || ref.bbox?.page || 0;
-    };
-
-    const toFocusChunk = (refValue: BackendReference): TextChunk | null => {
-        const refPage = getRefPage(refValue);
-        if (!refPage) {
-            return null;
-        }
-
-        return {
-            ...refValue,
-            page: refPage,
-            bbox: refValue.bbox || {
-                page: refPage,
-                x: 0,
-                y: 0,
-                w: 120,
-                h: 120,
-            },
-        };
-    };
-
     const handleCheck = async () => {
-        if (!currentDocumentId || !complianceRequirements.trim() || !canRunCompliance) {
-            return;
-        }
+        if (!currentDocumentId || !complianceRequirements.trim()) return;
 
         setLoading(true);
         try {
-            const reqList = complianceRequirements.split('\n').map((r) => r.trim()).filter(Boolean);
+            const reqList = complianceRequirements.split('\n').filter(r => r.trim());
 
             const response = await fetch(`${apiBaseUrl}/api/documents/${currentDocumentId}/compliance`, {
                 method: 'POST',
@@ -73,78 +74,87 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
                 },
                 body: JSON.stringify({
                     requirements: reqList,
-                    api_key: config.deepseekApiKey || config.zhipuApiKey,
-                    allowed_pages: recognizedPages,
+                    api_key: config.deepseekApiKey || config.zhipuApiKey
                 }),
             });
 
-            if (!response.ok) {
-                throw new Error('Check failed');
-            }
+            if (!response.ok) throw new Error('Check failed');
 
             const data = await response.json();
+            // 后端现在返回 { results: [...], markdown: "..." }
+
+            // 更新到 store
             setComplianceResults(data.results || data, data.markdown || '');
         } catch (error) {
             console.error(error);
-            alert('\u68C0\u67E5\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5');
+            alert('检查失败，请重试');
         } finally {
             setLoading(false);
         }
     };
 
-    const handlePageClick = (pageNum: number) => {
-        for (const item of complianceResults) {
-            if (!item.references || item.references.length === 0) {
-                continue;
-            }
 
-            for (const ref of item.references) {
-                const refValue = ref as BackendReference;
-                const refPage = getRefPage(refValue);
-                if (refPage === pageNum) {
-                    const chunk = toFocusChunk(refValue);
-                    if (chunk) {
-                        focusReference(chunk, 'compliance');
-                    } else {
-                        focusPage(pageNum, 'compliance');
+
+    // 处理页码点击 (从 Markdown 中的 [[P5]] 格式)
+    const handlePageClick = (pageNum: number) => {
+        console.log('[CompliancePanel] handlePageClick called with pageNum:', pageNum);
+        console.log('[CompliancePanel] results:', complianceResults);
+
+        // 在 results 中查找对应页码的引用
+        for (const item of complianceResults) {
+            if (item.references && item.references.length > 0) {
+                for (const rawRef of item.references) {
+                    const ref: CompatTextChunk = rawRef;
+                    console.log('[CompliancePanel] Checking ref:', ref);
+                    // 后端返回的是序列化后的 TextChunk，字段名可能是 page_number 或通过 bbox.page
+                    const refPage = getRefPage(ref);
+                    console.log('[CompliancePanel] refPage:', refPage, 'target:', pageNum);
+                    if (refPage === pageNum) {
+                        // 构建高亮对象
+                        const highlightRef = toHighlightRef(ref, refPage);
+                        console.log('[CompliancePanel] Setting highlight:', highlightRef);
+                        setHighlights([highlightRef]);
+                        setCurrentPage(pageNum);
+                        return;
                     }
-                    return;
                 }
             }
         }
 
-        focusPage(pageNum, 'compliance');
+        // 如果没找到具体引用，至少跳转到该页
+        console.log('[CompliancePanel] No matching ref found, just navigating to page:', pageNum);
+        setCurrentPage(pageNum);
     };
 
+    // 处理 [ref-N] 格式引用点击
     const handleRefClick = (refIndex: number) => {
+        console.log('[CompliancePanel] handleRefClick called with refIndex:', refIndex);
         const targetRefId = `ref-${refIndex}`;
 
+        // 在所有 results 中查找对应 refId 的引用
         for (const item of complianceResults) {
-            if (!item.references || item.references.length === 0) {
-                continue;
-            }
+            if (item.references && item.references.length > 0) {
+                for (const rawRef of item.references) {
+                    const ref: CompatTextChunk = rawRef;
+                    // 兼容 ref_id (后端返回) 和 refId (前端定义)
+                    const currentRefId = getRefId(ref);
 
-            for (const ref of item.references) {
-                const refValue = ref as BackendReference;
-                const currentRefId = refValue.ref_id || refValue.refId;
-                if (currentRefId !== targetRefId) {
-                    continue;
-                }
+                    if (currentRefId === targetRefId) {
+                        const refPage = getRefPage(ref);
 
-                const refPage = getRefPage(refValue);
-                if (!refPage) {
-                    continue;
+                        if (refPage) {
+                            console.log('[CompliancePanel] Found matching ref:', ref);
+                            // 构建高亮对象
+                            const highlightRef = toHighlightRef(ref, refPage);
+                            setHighlights([highlightRef]);
+                            setCurrentPage(refPage);
+                            return;
+                        }
+                    }
                 }
-
-                const chunk = toFocusChunk(refValue);
-                if (chunk) {
-                    focusReference(chunk, 'compliance');
-                } else {
-                    focusPage(refPage, 'compliance');
-                }
-                return;
             }
         }
+        console.log('[CompliancePanel] No ref found for index:', refIndex);
     };
 
     return (
@@ -152,7 +162,7 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
             <div className="input-section">
                 <textarea
                     className="req-input"
-                    placeholder="\u8BF7\u8F93\u5165\u6280\u672F\u8981\u6C42\uFF0C\u6BCF\u884C\u4E00\u6761..."
+                    placeholder="请输入技术要求，每行一条..."
                     value={complianceRequirements}
                     onChange={(e) => setComplianceRequirements(e.target.value)}
                     disabled={loading}
@@ -160,30 +170,31 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
                 <button
                     className="check-btn"
                     onClick={handleCheck}
-                    disabled={loading || !canRunCompliance}
+                    disabled={loading || !currentDocumentId}
                 >
-                    {loading ? '\u6B63\u5728\u68C0\u67E5...' : '\u5F00\u59CB\u5408\u89C4\u6027\u68C0\u67E5'}
+                    {loading ? '正在检查...' : '开始合规性检查'}
                 </button>
             </div>
 
             <div className="results-section markdown-result">
-                {!canRunCompliance ? (
-                    <div className="empty-state">
-                        <p>{'\u8BF7\u5148\u8BC6\u522B\u9875\u9762\uFF0C\u518D\u8FDB\u884C\u5408\u89C4\u68C0\u67E5\u3002'}</p>
-                    </div>
-                ) : complianceMarkdown ? (
+                {complianceMarkdown ? (
                     <ReactMarkdown
                         remarkPlugins={[remarkGfm]}
                         components={{
-                            p: ({ children }) => <p>{processPageRefs(children, handlePageClick, handleRefClick)}</p>,
-                            td: ({ children }) => <td>{processPageRefs(children, handlePageClick, handleRefClick)}</td>,
+                            // 自定义文本渲染，处理引用
+                            p: ({ children }) => {
+                                return <p>{processPageRefs(children, handlePageClick, handleRefClick)}</p>;
+                            },
+                            td: ({ children }) => {
+                                return <td>{processPageRefs(children, handlePageClick, handleRefClick)}</td>;
+                            }
                         }}
                     >
                         {complianceMarkdown}
                     </ReactMarkdown>
                 ) : (
                     <div className="empty-state">
-                        <p>{'\u8F93\u5165\u6280\u672F\u8981\u6C42\u540E\u70B9\u51FB\u201C\u5F00\u59CB\u5408\u89C4\u6027\u68C0\u67E5\u201D'}</p>
+                        <p>输入技术要求后点击"开始合规性检查"</p>
                     </div>
                 )}
             </div>
@@ -191,14 +202,18 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
     );
 };
 
+// 处理文本中的引用标记，转换为可点击的标签
+// 支持两种格式: [[P数字]] 和 [ref-数字]
 function processPageRefs(
     children: React.ReactNode,
     onPageClick: (page: number) => void,
     onRefClick?: (refIndex: number) => void
 ): React.ReactNode {
     if (typeof children === 'string') {
+        // 匹配 [[P数字]] 或 [ref-数字] 格式
         const parts = children.split(/(\[\[P\d+\]\]|\[ref-\d+\])/g);
         return parts.map((part, index) => {
+            // 匹配 [[P数字]] 格式
             const pageMatch = part.match(/\[\[P(\d+)\]\]/);
             if (pageMatch) {
                 const pageNum = parseInt(pageMatch[1], 10);
@@ -207,13 +222,14 @@ function processPageRefs(
                         key={index}
                         className="ref-tag"
                         onClick={() => onPageClick(pageNum)}
-                        title={`\u8DF3\u8F6C\u5230\u7B2C ${pageNum} \u9875`}
+                        title={`跳转到第 ${pageNum} 页`}
                     >
                         P{pageNum}
                     </span>
                 );
             }
 
+            // 匹配 [ref-数字] 格式
             const refMatch = part.match(/\[ref-(\d+)\]/);
             if (refMatch) {
                 const refIndex = parseInt(refMatch[1], 10);
@@ -222,7 +238,7 @@ function processPageRefs(
                         key={index}
                         className="ref-tag ref-inline"
                         onClick={() => onRefClick?.(refIndex)}
-                        title={`\u8DF3\u8F6C\u5230\u5F15\u7528 ${refIndex}`}
+                        title={`跳转到引用 ${refIndex}`}
                     >
                         {refIndex}
                     </span>
@@ -233,6 +249,7 @@ function processPageRefs(
         });
     }
 
+    // 如果是数组，递归处理每个元素
     if (Array.isArray(children)) {
         return children.map((child, index) => (
             <React.Fragment key={index}>
@@ -243,3 +260,4 @@ function processPageRefs(
 
     return children;
 }
+
