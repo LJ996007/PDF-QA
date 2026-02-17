@@ -6,6 +6,10 @@ Storage layout (relative to backend working dir):
     documents.json
     ocr/
       {doc_id}.json
+    chat/
+      {doc_id}.json
+    compliance/
+      {doc_id}.json
 """
 
 from __future__ import annotations
@@ -30,11 +34,15 @@ class DocumentStore:
         self.base_dir = Path(base_dir)
         self.index_path = self.base_dir / "documents.json"
         self.ocr_dir = self.base_dir / "ocr"
-        self._lock = threading.Lock()
+        self.chat_dir = self.base_dir / "chat"
+        self.compliance_dir = self.base_dir / "compliance"
+        self._lock = threading.RLock()
 
     def _ensure_dirs(self) -> None:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.ocr_dir.mkdir(parents=True, exist_ok=True)
+        self.chat_dir.mkdir(parents=True, exist_ok=True)
+        self.compliance_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_index_unlocked(self) -> Dict[str, Any]:
         self._ensure_dirs()
@@ -137,11 +145,21 @@ class DocumentStore:
             self._ensure_dirs()
             idx = self._load_index_unlocked()
             docs = idx.get("documents") or []
+            # Capture existing record for best-effort cleanup.
+            existing = next((d for d in docs if d.get("doc_id") == doc_id), None)
             new_docs = [d for d in docs if d.get("doc_id") != doc_id]
             changed = len(new_docs) != len(docs)
             if changed:
                 idx["documents"] = new_docs
                 self._save_index_unlocked(idx)
+
+            # Best-effort delete persisted PDF (when keep_pdf=1).
+            try:
+                pdf_path = (existing or {}).get("pdf_path")
+                if pdf_path and os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+            except Exception:
+                pass
 
             # Best-effort delete OCR payload.
             try:
@@ -151,6 +169,81 @@ class DocumentStore:
             except Exception:
                 pass
             return changed
+
+    def _load_chat_unlocked(self, doc_id: str) -> Dict[str, Any]:
+        self._ensure_dirs()
+        path = self.chat_dir / f"{doc_id}.json"
+        if not path.exists():
+            data = {"version": 1, "doc_id": doc_id, "messages": []}
+            _atomic_write_json(path, data)
+            return data
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("invalid chat data")
+            if "messages" not in data or not isinstance(data.get("messages"), list):
+                data["messages"] = []
+            data.setdefault("version", 1)
+            data.setdefault("doc_id", doc_id)
+            return data
+        except Exception:
+            data = {"version": 1, "doc_id": doc_id, "messages": []}
+            _atomic_write_json(path, data)
+            return data
+
+    def load_chat(self, doc_id: str) -> Dict[str, Any]:
+        with self._lock:
+            return self._load_chat_unlocked(doc_id)
+
+    def append_chat(self, doc_id: str, user_message: Dict[str, Any], assistant_message: Dict[str, Any]) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            path = self.chat_dir / f"{doc_id}.json"
+            data = self._load_chat_unlocked(doc_id)
+            msgs = list(data.get("messages") or [])
+            msgs.append(user_message)
+            msgs.append(assistant_message)
+            data["messages"] = msgs
+            _atomic_write_json(path, data)
+
+    def delete_chat(self, doc_id: str) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            try:
+                path = self.chat_dir / f"{doc_id}.json"
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+
+    def save_compliance(self, doc_id: str, payload: Dict[str, Any]) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            path = self.compliance_dir / f"{doc_id}.json"
+            _atomic_write_json(path, payload)
+
+    def load_compliance(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        self._ensure_dirs()
+        path = self.compliance_dir / f"{doc_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return None
+            return data
+        except Exception:
+            return None
+
+    def delete_compliance(self, doc_id: str) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            try:
+                path = self.compliance_dir / f"{doc_id}.json"
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
 
     def save_ocr_result(self, doc_id: str, payload: Dict[str, Any]) -> None:
         with self._lock:

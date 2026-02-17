@@ -122,7 +122,7 @@ interface DocumentState {
     complianceRequirements: string;
 
     // Actions
-    setDocument: (doc: Document, pdfUrl: string) => void;
+    setDocument: (doc: Document, pdfUrl: string | null) => void;
     clearDocument: () => void;
 
     // 合规性Actions
@@ -137,6 +137,7 @@ interface DocumentState {
 
     // 消息
     addMessage: (message: ChatMessage) => void;
+    setMessages: (messages: ChatMessage[]) => void;
     updateMessage: (id: string, updates: Partial<ChatMessage>) => void;
     appendToMessage: (id: string, text: string, refs?: string[]) => void;
     clearMessages: () => void;
@@ -144,15 +145,6 @@ interface DocumentState {
 
     // 配置
     updateConfig: (config: Partial<AppConfig>) => void;
-}
-
-interface StoredPromptRecord {
-    id: string;
-    name: string;
-    description: string;
-    content: string;
-    createdAt?: Date | string;
-    updatedAt?: Date | string;
 }
 
 // 初始化配置（首次启动或兼容旧数据）
@@ -204,7 +196,7 @@ const initializeConfig = (): AppConfig => {
 
         // 兼容旧版本：移除 isBuiltin 字段
         if (config.customPrompts) {
-            config.customPrompts = config.customPrompts.map((p: StoredPromptRecord) => ({
+            config.customPrompts = config.customPrompts.map((p: any) => ({
                 id: p.id,
                 name: p.name,
                 description: p.description,
@@ -323,6 +315,10 @@ export const useDocumentStore = create<DocumentState>()(
             // 消息操作
             addMessage: (message) => set((state) => {
                 state.messages.push(message);
+            }),
+
+            setMessages: (messages) => set((state) => {
+                state.messages = messages;
             }),
 
             updateMessage: (id, updates) => set((state) => {

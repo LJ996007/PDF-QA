@@ -325,6 +325,115 @@ body {
   box-shadow: var(--shadow-xl);
 }
 
+/* History Panel (local OCR/text cache) */
+.history-panel {
+  width: min(720px, 100%);
+  margin-top: 28px;
+  padding: 14px 14px 10px;
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(6px);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  max-height: 320px;
+  overflow: auto;
+}
+
+.history-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+  margin-bottom: 10px;
+  text-align: left;
+}
+
+.history-empty {
+  text-align: left;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  padding: 8px 0;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.history-item {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  border-radius: 10px;
+}
+
+.history-meta {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.history-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.history-sub {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+
+.history-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.history-btn {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.history-btn:hover {
+  background: var(--bg-hover);
+  transform: translateY(-1px);
+}
+
+.history-btn.secondary {
+  background: transparent;
+}
+
+.history-btn.secondary:hover {
+  background: var(--bg-tertiary);
+}
+
+.history-btn.danger {
+  border-color: rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--error-color);
+}
+
+.history-btn.danger:hover {
+  background: rgba(220, 38, 38, 0.14);
+}
+
 /* 全局进度覆盖层 */
 .process-overlay {
   position: absolute;
@@ -488,57 +597,4 @@ body {
 ::selection {
   background: #bfdbfe;
   color: var(--text-primary);
-}
-
-.upload-choice-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(15, 23, 42, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 2000;
-}
-
-.upload-choice-modal {
-  width: min(90vw, 420px);
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: var(--shadow-xl);
-  border: 1px solid var(--border-color);
-  padding: 20px;
-}
-
-.upload-choice-modal h3 {
-  font-size: 18px;
-  margin-bottom: 8px;
-  color: var(--text-primary);
-}
-
-.upload-choice-modal p {
-  font-size: 14px;
-  color: var(--text-secondary);
-  margin-bottom: 16px;
-}
-
-.upload-choice-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.upload-choice-actions button {
-  border: 1px solid var(--border-color);
-  background: #fff;
-  color: var(--text-primary);
-  border-radius: 8px;
-  padding: 8px 14px;
-  cursor: pointer;
-  font-size: 14px;
-}
-
-.upload-choice-actions button:first-child {
-  background: var(--primary-color);
-  border-color: var(--primary-color);
-  color: #fff;
 }
