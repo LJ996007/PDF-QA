@@ -4,6 +4,9 @@ import { immer } from 'zustand/middleware/immer';
 import type { PromptTemplate } from '../constants/prompts';
 import { createExamplePrompts } from '../constants/prompts';
 
+/**
+ * 边界框类型（PDF坐标）
+ */
 export interface BoundingBox {
     page: number;
     x: number;
@@ -12,10 +15,13 @@ export interface BoundingBox {
     h: number;
 }
 
+/**
+ * 文本块类型
+ */
 export interface TextChunk {
     id: string;
     refId: string;
-    ref_id?: string;
+    ref_id?: string; // Backend snake_case compatibility
     content: string;
     page: number;
     bbox: BoundingBox;
@@ -30,36 +36,20 @@ export interface ComplianceItem {
     references: TextChunk[];
 }
 
-export type PageOcrStatus = 'unrecognized' | 'processing' | 'recognized' | 'failed';
-
-export type ViewerFocusSource = 'chat' | 'compliance';
-
-export interface ViewerFocusRequest {
-    requestId: number;
-    page: number;
-    bbox: BoundingBox;
-    source: ViewerFocusSource;
-}
-
+/**
+ * 文档信息
+ */
 export interface Document {
     id: string;
     name: string;
     totalPages: number;
     ocrRequiredPages: number[];
-    recognizedPages: number[];
-    pageOcrStatus: Record<number, PageOcrStatus>;
-    ocrMode: 'manual' | 'full';
     thumbnails: string[];
 }
 
-export interface OcrQueueProgress {
-    total: number;
-    completed: number;
-    failed: number;
-    isRunning: boolean;
-    message: string;
-}
-
+/**
+ * 对话消息
+ */
 export interface ChatMessage {
     id: string;
     role: 'user' | 'assistant';
@@ -70,20 +60,24 @@ export interface ChatMessage {
     isStreaming?: boolean;
 }
 
+/**
+ * 应用配置
+ */
 export interface AppConfig {
     apiBaseUrl: string;
-    embeddingsProvider: 'zhipu' | 'ollama';
+    embeddingsProvider: 'zhipu' | 'ollama'; // 暂时只支持智谱
     zhipuApiKey: string;
     baiduApiKey: string;
     baiduSecretKey: string;
     baiduOcrUrl: string;
     baiduOcrToken: string;
-    ocrProvider: 'baidu';
+    ocrProvider: 'baidu';  // OCR提供商
     deepseekApiKey: string;
     theme: 'light' | 'dark';
     pdfScale: number;
-    selectedPromptId: string;
-    customPrompts: PromptTemplate[];
+    // 提示词相关
+    selectedPromptId: string;      // 当前选中的提示词ID
+    customPrompts: PromptTemplate[]; // 用户自定义提示词列表
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -98,134 +92,80 @@ const DEFAULT_CONFIG: AppConfig = {
     deepseekApiKey: '',
     theme: 'light',
     pdfScale: 1.0,
-    selectedPromptId: '',
-    customPrompts: [],
+    selectedPromptId: '', // Will be set by initializeConfig
+    customPrompts: [],    // Will be set by initializeConfig
 };
 
+/**
+ * Store状态
+ */
 interface DocumentState {
+    // 当前文档
     currentDocument: Document | null;
     pdfUrl: string | null;
 
+    // PDF渲染状态
     scale: number;
     currentPage: number;
     highlights: TextChunk[];
-    viewerFocusRequest: ViewerFocusRequest | null;
 
-    selectedPages: number[];
-    ocrQueueProgress: OcrQueueProgress;
-
+    // 对话状态
     messages: ChatMessage[];
     isLoading: boolean;
 
+    // 配置
     config: AppConfig;
 
+    // 合规性检查状态
     complianceResults: ComplianceItem[];
     complianceMarkdown: string;
     complianceRequirements: string;
 
-    setDocument: (doc: Document, pdfUrl: string) => void;
-    updateCurrentDocument: (updates: Partial<Document>) => void;
-    setPageOcrStatus: (page: number, status: PageOcrStatus) => void;
+    // Actions
+    setDocument: (doc: Document, pdfUrl: string | null) => void;
     clearDocument: () => void;
 
-    setSelectedPages: (pages: number[]) => void;
-    toggleSelectedPage: (page: number) => void;
-    clearSelectedPages: () => void;
-
-    setOcrQueueProgress: (progress: Partial<OcrQueueProgress>) => void;
-    resetOcrQueueProgress: () => void;
-
+    // 合规性Actions
     setComplianceResults: (results: ComplianceItem[], markdown: string) => void;
     setComplianceRequirements: (text: string) => void;
 
     setScale: (scale: number) => void;
     setCurrentPage: (page: number) => void;
-    focusReference: (chunk: TextChunk, source: ViewerFocusSource) => void;
-    focusPage: (page: number, source: ViewerFocusSource) => void;
     setHighlights: (chunks: TextChunk[]) => void;
     addHighlight: (chunk: TextChunk) => void;
     clearHighlights: () => void;
 
+    // 消息
     addMessage: (message: ChatMessage) => void;
+    setMessages: (messages: ChatMessage[]) => void;
     updateMessage: (id: string, updates: Partial<ChatMessage>) => void;
     appendToMessage: (id: string, text: string, refs?: string[]) => void;
     clearMessages: () => void;
     setLoading: (loading: boolean) => void;
 
+    // 配置
     updateConfig: (config: Partial<AppConfig>) => void;
 }
 
-const INITIAL_OCR_QUEUE_PROGRESS: OcrQueueProgress = {
-    total: 0,
-    completed: 0,
-    failed: 0,
-    isRunning: false,
-    message: '',
-};
-
-const toRecordNumberKey = (value: Record<number, PageOcrStatus> | Record<string, PageOcrStatus> | undefined): Record<number, PageOcrStatus> => {
-    if (!value) {
-        return {};
-    }
-
-    const output: Record<number, PageOcrStatus> = {};
-    Object.entries(value).forEach(([key, status]) => {
-        const page = Number(key);
-        if (!Number.isNaN(page)) {
-            output[page] = status;
-        }
-    });
-    return output;
-};
-
-const toConsistentRecognizedPages = (
-    recognizedPages: number[] | undefined,
-    pageOcrStatus: Record<number, PageOcrStatus> | undefined,
-    totalPages: number
-): number[] => {
-    const pages = new Set<number>((recognizedPages || []).map((p) => Number(p)).filter((p) => Number.isFinite(p)));
-    Object.entries(pageOcrStatus || {}).forEach(([key, status]) => {
-        if (status !== 'recognized') {
-            return;
-        }
-        const page = Number(key);
-        if (!Number.isNaN(page)) {
-            pages.add(page);
-        }
-    });
-
-    return [...pages]
-        .filter((page) => page >= 1 && page <= totalPages)
-        .sort((a, b) => a - b);
-};
-
-const toConsistentRequiredPages = (totalPages: number, recognizedPages: number[]): number[] => {
-    const recognizedSet = new Set(recognizedPages);
-    const required: number[] = [];
-    for (let page = 1; page <= totalPages; page += 1) {
-        if (!recognizedSet.has(page)) {
-            required.push(page);
-        }
-    }
-    return required;
-};
-
-interface StoredPromptTemplate {
-    id: string;
-    name: string;
-    description: string;
-    content: string;
-    createdAt?: string | Date;
-    updatedAt?: string | Date;
-}
-
+// 初始化配置（首次启动或兼容旧数据）
 const initializeConfig = (): AppConfig => {
     const stored = localStorage.getItem('pdf-qa-storage');
 
     if (!stored) {
+        // 首次启动，创建示例提示词
         const examplePrompts = createExamplePrompts();
         return {
-            ...DEFAULT_CONFIG,
+            apiBaseUrl: 'http://localhost:8000',
+            embeddingsProvider: 'zhipu',
+            zhipuApiKey: '',
+            deepseekApiKey: '',
+            baiduApiKey: '',
+            baiduSecretKey: '',
+            ocrProvider: 'baidu',
+            baiduOcrUrl: '',
+            baiduOcrToken: '',
+            theme: 'light',
+            pdfScale: 1.0,
             selectedPromptId: examplePrompts[0].id,
             customPrompts: examplePrompts,
         };
@@ -238,14 +178,25 @@ const initializeConfig = (): AppConfig => {
         if (!config) {
             const examplePrompts = createExamplePrompts();
             return {
-                ...DEFAULT_CONFIG,
+                apiBaseUrl: 'http://localhost:8000',
+                embeddingsProvider: 'zhipu',
+                zhipuApiKey: '',
+                deepseekApiKey: '',
+                baiduApiKey: '',
+                baiduSecretKey: '',
+                ocrProvider: 'baidu',
+                baiduOcrUrl: '',
+                baiduOcrToken: '',
+                theme: 'light',
+                pdfScale: 1.0,
                 selectedPromptId: examplePrompts[0].id,
                 customPrompts: examplePrompts,
             };
         }
 
+        // 兼容旧版本：移除 isBuiltin 字段
         if (config.customPrompts) {
-            config.customPrompts = config.customPrompts.map((p: StoredPromptTemplate) => ({
+            config.customPrompts = config.customPrompts.map((p: any) => ({
                 id: p.id,
                 name: p.name,
                 description: p.description,
@@ -255,18 +206,31 @@ const initializeConfig = (): AppConfig => {
             }));
         }
 
-        if (!config.customPrompts || config.customPrompts.length === 0) {
+        // 如果没有提示词，初始化为示例
+        if (!config?.customPrompts || config.customPrompts.length === 0) {
             const examplePrompts = createExamplePrompts();
             config.customPrompts = examplePrompts;
             config.selectedPromptId = examplePrompts[0].id;
         }
 
+        // 确保所有字段都存在（合并默认配置）
         return { ...DEFAULT_CONFIG, ...config };
     } catch (error) {
         console.error('Failed to parse stored config:', error);
+        // 解析失败，返回默认配置
         const examplePrompts = createExamplePrompts();
         return {
-            ...DEFAULT_CONFIG,
+            apiBaseUrl: 'http://localhost:8000',
+            embeddingsProvider: 'zhipu',
+            zhipuApiKey: '',
+            deepseekApiKey: '',
+            baiduApiKey: '',
+            baiduSecretKey: '',
+            ocrProvider: 'baidu',
+            baiduOcrUrl: '',
+            baiduOcrToken: '',
+            theme: 'light',
+            pdfScale: 1.0,
             selectedPromptId: examplePrompts[0].id,
             customPrompts: examplePrompts,
         };
@@ -276,135 +240,45 @@ const initializeConfig = (): AppConfig => {
 export const useDocumentStore = create<DocumentState>()(
     persist(
         immer((set) => ({
+            // 初始状态
             currentDocument: null,
             pdfUrl: null,
             scale: 1.0,
             currentPage: 1,
             highlights: [],
-            viewerFocusRequest: null,
-            selectedPages: [],
-            ocrQueueProgress: INITIAL_OCR_QUEUE_PROGRESS,
             messages: [],
             isLoading: false,
             config: initializeConfig(),
 
+            // 合规性初始状态
             complianceResults: [],
             complianceMarkdown: '',
             complianceRequirements: '',
 
+            // 文档操作
             setDocument: (doc, pdfUrl) => set((state) => {
-                const normalizedStatus = toRecordNumberKey(doc.pageOcrStatus);
-                const normalizedRecognized = toConsistentRecognizedPages(
-                    doc.recognizedPages || [],
-                    normalizedStatus,
-                    doc.totalPages || 0
-                );
-                const normalizedRequired = toConsistentRequiredPages(doc.totalPages || 0, normalizedRecognized);
-
-                state.currentDocument = {
-                    ...doc,
-                    recognizedPages: normalizedRecognized,
-                    pageOcrStatus: normalizedStatus,
-                    ocrRequiredPages: normalizedRequired,
-                };
+                state.currentDocument = doc;
                 state.pdfUrl = pdfUrl;
                 state.currentPage = 1;
                 state.highlights = [];
-                state.viewerFocusRequest = null;
                 state.messages = [];
-                state.selectedPages = [];
-                state.ocrQueueProgress = { ...INITIAL_OCR_QUEUE_PROGRESS };
+                // 重置合规性状态
                 state.complianceResults = [];
                 state.complianceMarkdown = '';
                 state.complianceRequirements = '';
-            }),
-
-            updateCurrentDocument: (updates) => set((state) => {
-                if (!state.currentDocument) {
-                    return;
-                }
-
-                const nextTotalPages = updates.totalPages ?? state.currentDocument.totalPages;
-                const nextStatus = updates.pageOcrStatus
-                    ? {
-                        ...state.currentDocument.pageOcrStatus,
-                        ...toRecordNumberKey(updates.pageOcrStatus),
-                    }
-                    : state.currentDocument.pageOcrStatus;
-
-                const nextRecognized = toConsistentRecognizedPages(
-                    updates.recognizedPages ?? state.currentDocument.recognizedPages,
-                    nextStatus,
-                    nextTotalPages
-                );
-                const nextRequired = toConsistentRequiredPages(nextTotalPages, nextRecognized);
-
-                state.currentDocument = {
-                    ...state.currentDocument,
-                    ...updates,
-                    pageOcrStatus: nextStatus,
-                    recognizedPages: nextRecognized,
-                    ocrRequiredPages: nextRequired,
-                };
-            }),
-
-            setPageOcrStatus: (page, status) => set((state) => {
-                if (!state.currentDocument) {
-                    return;
-                }
-
-                state.currentDocument.pageOcrStatus[page] = status;
-                state.currentDocument.recognizedPages = toConsistentRecognizedPages(
-                    state.currentDocument.recognizedPages,
-                    state.currentDocument.pageOcrStatus,
-                    state.currentDocument.totalPages
-                );
-                state.currentDocument.ocrRequiredPages = toConsistentRequiredPages(
-                    state.currentDocument.totalPages,
-                    state.currentDocument.recognizedPages
-                );
             }),
 
             clearDocument: () => set((state) => {
                 state.currentDocument = null;
                 state.pdfUrl = null;
                 state.highlights = [];
-                state.viewerFocusRequest = null;
                 state.messages = [];
-                state.selectedPages = [];
-                state.ocrQueueProgress = { ...INITIAL_OCR_QUEUE_PROGRESS };
                 state.complianceResults = [];
                 state.complianceMarkdown = '';
                 state.complianceRequirements = '';
             }),
 
-            setSelectedPages: (pages) => set((state) => {
-                state.selectedPages = [...new Set(pages)].sort((a, b) => a - b);
-            }),
-
-            toggleSelectedPage: (page) => set((state) => {
-                if (state.selectedPages.includes(page)) {
-                    state.selectedPages = state.selectedPages.filter((p) => p !== page);
-                } else {
-                    state.selectedPages = [...state.selectedPages, page].sort((a, b) => a - b);
-                }
-            }),
-
-            clearSelectedPages: () => set((state) => {
-                state.selectedPages = [];
-            }),
-
-            setOcrQueueProgress: (progress) => set((state) => {
-                state.ocrQueueProgress = {
-                    ...state.ocrQueueProgress,
-                    ...progress,
-                };
-            }),
-
-            resetOcrQueueProgress: () => set((state) => {
-                state.ocrQueueProgress = { ...INITIAL_OCR_QUEUE_PROGRESS };
-            }),
-
+            // 合规性操作
             setComplianceResults: (results, markdown) => set((state) => {
                 state.complianceResults = results;
                 state.complianceMarkdown = markdown;
@@ -414,6 +288,7 @@ export const useDocumentStore = create<DocumentState>()(
                 state.complianceRequirements = text;
             }),
 
+            // 渲染状态
             setScale: (scale) => set((state) => {
                 state.scale = scale;
             }),
@@ -422,50 +297,12 @@ export const useDocumentStore = create<DocumentState>()(
                 state.currentPage = page;
             }),
 
-            focusReference: (chunk, source) => set((state) => {
-                const nextRequestId = (state.viewerFocusRequest?.requestId || 0) + 1;
-
-                state.highlights = [chunk];
-                state.currentPage = chunk.page;
-                if (state.scale <= 0.7) {
-                    state.scale = 1.2;
-                }
-                state.viewerFocusRequest = {
-                    requestId: nextRequestId,
-                    page: chunk.page,
-                    bbox: chunk.bbox,
-                    source,
-                };
-            }),
-
-            focusPage: (page, source) => set((state) => {
-                const nextRequestId = (state.viewerFocusRequest?.requestId || 0) + 1;
-                const safePage = Math.max(1, page);
-
-                state.currentPage = safePage;
-                if (state.scale <= 0.7) {
-                    state.scale = 1.2;
-                }
-                state.viewerFocusRequest = {
-                    requestId: nextRequestId,
-                    page: safePage,
-                    bbox: {
-                        page: safePage,
-                        x: 0,
-                        y: 0,
-                        w: 120,
-                        h: 120,
-                    },
-                    source,
-                };
-            }),
-
             setHighlights: (chunks) => set((state) => {
                 state.highlights = chunks;
             }),
 
             addHighlight: (chunk) => set((state) => {
-                const exists = state.highlights.some((h) => h.id === chunk.id);
+                const exists = state.highlights.some(h => h.id === chunk.id);
                 if (!exists) {
                     state.highlights.push(chunk);
                 }
@@ -475,24 +312,29 @@ export const useDocumentStore = create<DocumentState>()(
                 state.highlights = [];
             }),
 
+            // 消息操作
             addMessage: (message) => set((state) => {
                 state.messages.push(message);
             }),
 
+            setMessages: (messages) => set((state) => {
+                state.messages = messages;
+            }),
+
             updateMessage: (id, updates) => set((state) => {
-                const idx = state.messages.findIndex((m) => m.id === id);
+                const idx = state.messages.findIndex(m => m.id === id);
                 if (idx !== -1) {
                     Object.assign(state.messages[idx], updates);
                 }
             }),
 
             appendToMessage: (id, text, refs) => set((state) => {
-                const idx = state.messages.findIndex((m) => m.id === id);
+                const idx = state.messages.findIndex(m => m.id === id);
                 if (idx !== -1) {
                     state.messages[idx].content += text;
                     if (refs) {
                         state.messages[idx].activeRefs = [
-                            ...new Set([...state.messages[idx].activeRefs, ...refs]),
+                            ...new Set([...state.messages[idx].activeRefs, ...refs])
                         ];
                     }
                 }
@@ -506,6 +348,7 @@ export const useDocumentStore = create<DocumentState>()(
                 state.isLoading = loading;
             }),
 
+            // 配置
             updateConfig: (config) => set((state) => {
                 Object.assign(state.config, config);
             }),

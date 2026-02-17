@@ -27,6 +27,16 @@ async def lifespan(app: FastAPI):
     os.makedirs("uploads", exist_ok=True)
     os.makedirs("chroma_db", exist_ok=True)
     os.makedirs("thumbnails", exist_ok=True)
+    os.makedirs(os.path.join("doc_store", "ocr"), exist_ok=True)
+    os.makedirs(os.path.join("doc_store", "chat"), exist_ok=True)
+    os.makedirs(os.path.join("doc_store", "compliance"), exist_ok=True)
+
+    # Load persisted documents into the in-memory registry so chat can work after restart.
+    try:
+        documents.load_persisted_documents()
+    except Exception as e:
+        # Do not block server startup for persistence errors.
+        print(f"[DOC_STORE] Failed to load persisted documents: {e}")
     
     yield
     
