@@ -122,7 +122,7 @@ interface DocumentState {
     complianceRequirements: string;
 
     // Actions
-    setDocument: (doc: Document, pdfUrl: string) => void;
+    setDocument: (doc: Document, pdfUrl: string | null) => void;
     clearDocument: () => void;
 
     // 合规性Actions
@@ -137,6 +137,7 @@ interface DocumentState {
 
     // 消息
     addMessage: (message: ChatMessage) => void;
+    setMessages: (messages: ChatMessage[]) => void;
     updateMessage: (id: string, updates: Partial<ChatMessage>) => void;
     appendToMessage: (id: string, text: string, refs?: string[]) => void;
     clearMessages: () => void;
@@ -314,6 +315,10 @@ export const useDocumentStore = create<DocumentState>()(
             // 消息操作
             addMessage: (message) => set((state) => {
                 state.messages.push(message);
+            }),
+
+            setMessages: (messages) => set((state) => {
+                state.messages = messages;
             }),
 
             updateMessage: (id, updates) => set((state) => {

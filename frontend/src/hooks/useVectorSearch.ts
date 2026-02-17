@@ -1,8 +1,6 @@
 import { useCallback } from 'react';
 import { useDocumentStore } from '../stores/documentStore';
-import type { TextChunk } from '../stores/documentStore';
-
-const API_BASE = 'http://localhost:8000/api';
+import type { ChatMessage, ComplianceItem, TextChunk } from '../stores/documentStore';
 
 export interface ChatStreamEvent {
     type: 'thinking' | 'references' | 'content' | 'done' | 'error';
@@ -25,87 +23,113 @@ export interface ChatStreamEvent {
     final_refs?: string[];
 }
 
+export interface HistoryDocumentItem {
+    doc_id: string;
+    filename: string;
+    created_at: string;
+    total_pages: number;
+    ocr_required_pages: number[];
+    sha256: string;
+    status: string;
+    has_pdf?: boolean;
+}
+
 export function useVectorSearch() {
-    const { currentDocument, config, setHighlights, addMessage, appendToMessage, updateMessage, setLoading } = useDocumentStore();
+    const {
+        currentDocument,
+        config,
+        messages,
+        setHighlights,
+        addMessage,
+        appendToMessage,
+        updateMessage,
+        setLoading,
+    } = useDocumentStore();
 
-    /**
-     * 发送问题并处理流式响应
-     */
-    const askQuestion = useCallback(async (question: string): Promise<void> => {
-        if (!currentDocument) {
-            throw new Error('没有打开的文档');
-        }
+    const apiOrigin = (config.apiBaseUrl || 'http://localhost:8000').replace(/\/$/, '');
+    const API_BASE = `${apiOrigin}/api`;
 
-        // 添加用户消息
-        const userMessageId = `user_${Date.now()}`;
-        addMessage({
-            id: userMessageId,
-            role: 'user',
-            content: question,
-            references: [],
-            activeRefs: [],
-            timestamp: new Date(),
-        });
+    const askQuestion = useCallback(
+        async (question: string, opts?: { useContext?: boolean }): Promise<void> => {
+            if (!currentDocument) {
+                throw new Error('没有打开的文档');
+            }
 
-        // 添加助手消息占位
-        const assistantMessageId = `assistant_${Date.now()}`;
-        addMessage({
-            id: assistantMessageId,
-            role: 'assistant',
-            content: '',
-            references: [],
-            activeRefs: [],
-            timestamp: new Date(),
-            isStreaming: true,
-        });
+            const useContext = opts?.useContext !== false;
+            const historyPayload = useContext
+                ? messages
+                      .filter((m) => !m.isStreaming)
+                      .slice(-20)
+                      .map((m) => ({ role: m.role, content: m.content }))
+                : [];
 
-        setLoading(true);
-
-        try {
-            const response = await fetch(`${API_BASE}/chat`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    document_id: currentDocument.id,
-                    question: question,
-                    history: [],
-                    zhipu_api_key: config.zhipuApiKey,
-                    deepseek_api_key: config.deepseekApiKey,
-                }),
+            const userMessageId = `user_${Date.now()}`;
+            addMessage({
+                id: userMessageId,
+                role: 'user',
+                content: question,
+                references: [],
+                activeRefs: [],
+                timestamp: new Date(),
             });
 
-            if (!response.ok) {
-                throw new Error('请求失败');
-            }
+            const assistantMessageId = `assistant_${Date.now()}`;
+            addMessage({
+                id: assistantMessageId,
+                role: 'assistant',
+                content: '',
+                references: [],
+                activeRefs: [],
+                timestamp: new Date(),
+                isStreaming: true,
+            });
 
-            const reader = response.body?.getReader();
-            if (!reader) {
-                throw new Error('无法读取响应');
-            }
+            setLoading(true);
 
-            const decoder = new TextDecoder();
-            let buffer = '';
-            let references: TextChunk[] = [];
+            try {
+                const response = await fetch(`${API_BASE}/chat`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        document_id: currentDocument.id,
+                        question: question,
+                        history: historyPayload,
+                        zhipu_api_key: config.zhipuApiKey,
+                        deepseek_api_key: config.deepseekApiKey,
+                    }),
+                });
 
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
+                if (!response.ok) {
+                    throw new Error('请求失败');
+                }
 
-                buffer += decoder.decode(value, { stream: true });
+                const reader = response.body?.getReader();
+                if (!reader) {
+                    throw new Error('无法读取响应');
+                }
 
-                // 解析SSE事件
-                const lines = buffer.split('\n');
-                buffer = lines.pop() || '';
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let references: TextChunk[] = [];
 
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+
                         try {
                             const data: ChatStreamEvent = JSON.parse(line.slice(6));
 
                             if (data.type === 'references' && data.refs) {
-                                // 保存引用信息
                                 references = data.refs.map((ref) => ({
                                     id: ref.chunk_id,
                                     refId: ref.ref_id,
@@ -114,13 +138,10 @@ export function useVectorSearch() {
                                     bbox: ref.bbox,
                                     source: 'native' as const,
                                 }));
-
                                 updateMessage(assistantMessageId, { references });
                             } else if (data.type === 'content' && data.text) {
-                                // 追加文本
                                 appendToMessage(assistantMessageId, data.text, data.active_refs);
 
-                                // 高亮当前引用
                                 if (data.active_refs && data.active_refs.length > 0) {
                                     const activeChunks = references.filter((r) =>
                                         data.active_refs?.includes(r.refId)
@@ -136,110 +157,294 @@ export function useVectorSearch() {
                                 });
                             }
                         } catch {
-                            // 忽略解析错误
+                            // ignore parse errors
                         }
                     }
                 }
+            } catch (error) {
+                updateMessage(assistantMessageId, {
+                    content: error instanceof Error ? error.message : '请求失败',
+                    isStreaming: false,
+                });
+            } finally {
+                setLoading(false);
             }
-        } catch (error) {
-            updateMessage(assistantMessageId, {
-                content: error instanceof Error ? error.message : '请求失败',
-                isStreaming: false,
-            });
-        } finally {
-            setLoading(false);
-        }
-    }, [currentDocument, addMessage, appendToMessage, updateMessage, setHighlights, setLoading]);
+        },
+        [
+            currentDocument,
+            config,
+            messages,
+            addMessage,
+            appendToMessage,
+            updateMessage,
+            setHighlights,
+            setLoading,
+            API_BASE,
+        ]
+    );
 
-    /**
-     * 上传文档
-     */
-    /**
-     * 上传文档
-     */
-    const uploadDocument = useCallback(async (file: File): Promise<string | null> => {
-        const formData = new FormData();
-        formData.append('file', file);
+    const uploadDocument = useCallback(
+        async (file: File): Promise<string | null> => {
+            const formData = new FormData();
+            formData.append('file', file);
 
-        // 智谱配置
-        if (config.zhipuApiKey) {
-            formData.append('zhipu_api_key', config.zhipuApiKey);
-        }
-        // OCR提供商选择
-        formData.append('ocr_provider', 'baidu');
+            if (config.zhipuApiKey) {
+                formData.append('zhipu_api_key', config.zhipuApiKey);
+            }
+            formData.append('ocr_provider', 'baidu');
 
-        // 百度OCR配置
-        if (config.baiduOcrUrl) {
-            formData.append('baidu_ocr_url', config.baiduOcrUrl);
-        }
-        if (config.baiduOcrToken) {
-            formData.append('baidu_ocr_token', config.baiduOcrToken);
-        }
-
-        try {
-            const response = await fetch(`${API_BASE}/documents/upload`, {
-                method: 'POST',
-                body: formData,
-            });
-
-            if (!response.ok) {
-                throw new Error('上传失败');
+            if (config.baiduOcrUrl) {
+                formData.append('baidu_ocr_url', config.baiduOcrUrl);
+            }
+            if (config.baiduOcrToken) {
+                formData.append('baidu_ocr_token', config.baiduOcrToken);
             }
 
-            const data = await response.json();
-            return data.document_id;
-        } catch (error) {
-            console.error('上传错误:', error);
-            return null;
-        }
-    }, [config]);
-
-    /**
-     * 获取文档信息
-     */
-    const getDocument = useCallback(async (docId: string) => {
-        try {
-            const response = await fetch(`${API_BASE}/documents/${docId}`);
-            if (!response.ok) {
-                throw new Error('获取文档失败');
-            }
-            return await response.json();
-        } catch (error) {
-            console.error('获取文档错误:', error);
-            return null;
-        }
-    }, []);
-
-    /**
-     * 监听处理进度
-     */
-    const watchProgress = useCallback((docId: string, onProgress: (progress: any) => void): () => void => {
-        const eventSource = new EventSource(`${API_BASE}/documents/${docId}/progress`);
-
-        eventSource.addEventListener('progress', (event) => {
             try {
-                const data = JSON.parse(event.data);
-                onProgress(data);
+                const response = await fetch(`${API_BASE}/documents/upload`, {
+                    method: 'POST',
+                    body: formData,
+                });
 
-                if (data.stage === 'completed' || data.stage === 'failed') {
-                    eventSource.close();
+                if (!response.ok) {
+                    throw new Error('上传失败');
                 }
-            } catch {
-                // 忽略
+
+                const data = await response.json();
+                return data.document_id;
+            } catch (error) {
+                console.error('上传错误:', error);
+                return null;
             }
-        });
+        },
+        [config, API_BASE]
+    );
 
-        eventSource.onerror = () => {
-            eventSource.close();
-        };
+    const getDocument = useCallback(
+        async (docId: string) => {
+            try {
+                const response = await fetch(`${API_BASE}/documents/${docId}`);
+                if (!response.ok) {
+                    throw new Error('获取文档失败');
+                }
+                return await response.json();
+            } catch (error) {
+                console.error('获取文档错误:', error);
+                return null;
+            }
+        },
+        [API_BASE]
+    );
 
-        return () => eventSource.close();
-    }, []);
+    const getPdfUrl = useCallback(
+        (docId: string): string => {
+            return `${API_BASE}/documents/${docId}/pdf`;
+        },
+        [API_BASE]
+    );
+
+    const lookupDocument = useCallback(
+        async (sha256: string): Promise<{ exists: boolean; doc_id?: string; status?: string }> => {
+            try {
+                const response = await fetch(`${API_BASE}/documents/lookup`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sha256 }),
+                });
+                if (!response.ok) {
+                    throw new Error('lookup failed');
+                }
+                return await response.json();
+            } catch (error) {
+                console.error('lookup错误:', error);
+                return { exists: false };
+            }
+        },
+        [API_BASE]
+    );
+
+    const listHistory = useCallback(async (): Promise<HistoryDocumentItem[]> => {
+        try {
+            const response = await fetch(`${API_BASE}/documents/history`);
+            if (!response.ok) {
+                throw new Error('history failed');
+            }
+            const data = await response.json();
+            return Array.isArray(data) ? data : [];
+        } catch (error) {
+            console.error('history错误:', error);
+            return [];
+        }
+    }, [API_BASE]);
+
+    const deleteDocument = useCallback(
+        async (docId: string): Promise<boolean> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}`, { method: 'DELETE' });
+                return resp.ok;
+            } catch (e) {
+                console.error('deleteDocument错误:', e);
+                return false;
+            }
+        },
+        [API_BASE]
+    );
+
+    const attachPdf = useCallback(
+        async (docId: string, file: File): Promise<boolean> => {
+            try {
+                const form = new FormData();
+                form.append('file', file);
+                const resp = await fetch(`${API_BASE}/documents/${docId}/attach_pdf`, {
+                    method: 'POST',
+                    body: form,
+                });
+                return resp.ok;
+            } catch (e) {
+                console.error('attachPdf错误:', e);
+                return false;
+            }
+        },
+        [API_BASE]
+    );
+
+    const getChatHistory = useCallback(
+        async (docId: string): Promise<ChatMessage[]> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}/chat_history`);
+                if (!resp.ok) {
+                    throw new Error('获取聊天历史失败');
+                }
+                const data = await resp.json();
+                const raw = Array.isArray(data?.messages) ? data.messages : [];
+
+                return raw.map((m: any) => {
+                    const ts = m.timestamp ? new Date(m.timestamp) : new Date();
+                    const refs = Array.isArray(m.references) ? m.references : [];
+                    const mappedRefs: TextChunk[] = refs
+                        .map((r: any) => ({
+                            id:
+                                r.chunk_id ||
+                                r.chunkId ||
+                                r.id ||
+                                `${docId}_${r.ref_id || r.refId || 'ref'}_${r.page || 0}`,
+                            refId: r.ref_id || r.refId,
+                            content: r.content || '',
+                            page: r.page || 1,
+                            bbox: r.bbox,
+                            source: 'native' as const,
+                        }))
+                        .filter((r: any) => !!r.refId);
+
+                    return {
+                        id: m.id || `${m.role}_${ts.getTime()}`,
+                        role: m.role,
+                        content: m.content || '',
+                        references: mappedRefs,
+                        activeRefs: [],
+                        timestamp: ts,
+                        isStreaming: false,
+                    } as ChatMessage;
+                });
+            } catch (e) {
+                console.error('getChatHistory错误:', e);
+                return [];
+            }
+        },
+        [API_BASE]
+    );
+
+    const getComplianceHistory = useCallback(
+        async (
+            docId: string
+        ): Promise<{ requirementsText: string; results: ComplianceItem[]; markdown: string } | null> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}/compliance_history`);
+                if (resp.status === 404) return null;
+                if (!resp.ok) throw new Error('获取合规检查历史失败');
+
+                const data = await resp.json();
+                const reqs: string[] = Array.isArray(data?.requirements) ? data.requirements : [];
+                const resultsRaw: any[] = Array.isArray(data?.results) ? data.results : [];
+                const markdown: string = typeof data?.markdown === 'string' ? data.markdown : '';
+
+                const mapped: ComplianceItem[] = resultsRaw.map((item: any, idx: number) => {
+                    const refs = Array.isArray(item?.references) ? item.references : [];
+                    const mappedRefs: TextChunk[] = refs
+                        .map((r: any) => {
+                            const page = r?.page_number || r?.page || r?.bbox?.page || 1;
+                            const refId = r?.ref_id || r?.refId;
+                            const bbox = r?.bbox || { page, x: 0, y: 0, w: 100, h: 20 };
+                            return {
+                                id:
+                                    r?.id ||
+                                    r?.chunk_id ||
+                                    r?.chunkId ||
+                                    `${docId}_${refId || 'ref'}_${page}`,
+                                refId,
+                                content: r?.content || '',
+                                page,
+                                bbox,
+                                source: (r?.source_type === 'ocr' ? 'ocr' : 'native') as 'native' | 'ocr',
+                            } as TextChunk;
+                        })
+                        .filter((r: any) => !!r.refId);
+
+                    return {
+                        id: item?.id || idx + 1,
+                        requirement: item?.requirement || '',
+                        status: item?.status || 'unknown',
+                        response: item?.response || '',
+                        references: mappedRefs,
+                    } as ComplianceItem;
+                });
+
+                return { requirementsText: reqs.join('\n'), results: mapped, markdown };
+            } catch (e) {
+                console.error('getComplianceHistory错误:', e);
+                return null;
+            }
+        },
+        [API_BASE]
+    );
+
+    const watchProgress = useCallback(
+        (docId: string, onProgress: (progress: any) => void): () => void => {
+            const eventSource = new EventSource(`${API_BASE}/documents/${docId}/progress`);
+
+            eventSource.addEventListener('progress', (event) => {
+                try {
+                    const data = JSON.parse((event as MessageEvent).data);
+                    onProgress(data);
+
+                    if (data.stage === 'completed' || data.stage === 'failed') {
+                        eventSource.close();
+                    }
+                } catch {
+                    // ignore
+                }
+            });
+
+            eventSource.onerror = () => {
+                eventSource.close();
+            };
+
+            return () => eventSource.close();
+        },
+        [API_BASE]
+    );
 
     return {
         askQuestion,
         uploadDocument,
         getDocument,
+        getPdfUrl,
+        lookupDocument,
+        listHistory,
+        deleteDocument,
+        attachPdf,
+        getChatHistory,
+        getComplianceHistory,
         watchProgress,
     };
 }

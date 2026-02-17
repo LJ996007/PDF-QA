@@ -3,14 +3,15 @@ RAG对话路由
 """
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from app.models.schemas import ChatRequest, TextChunk
 from app.services.rag_engine import rag_engine
 from app.services.llm_router import llm_router
-from app.routers.documents import documents
+from app.routers.documents import documents, ensure_document_loaded
+from app.services.document_store import document_store
 
 
 router = APIRouter()
@@ -23,7 +24,7 @@ async def chat(request: ChatRequest):
     """
     doc_id = request.document_id
     
-    if doc_id not in documents:
+    if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
     
     # 1. 检索相关片段（增加到10个以覆盖更多相关内容）
@@ -33,6 +34,17 @@ async def chat(request: ChatRequest):
         top_k=10,
         api_key=request.zhipu_api_key
     )
+
+    refs_data = [
+        {
+            "ref_id": chunk.ref_id,
+            "chunk_id": chunk.id,
+            "page": chunk.page_number,
+            "bbox": chunk.bbox.model_dump(),
+            "content": chunk.content[:100] + "..." if len(chunk.content) > 100 else chunk.content,
+        }
+        for chunk in chunks
+    ]
     
     async def event_generator():
         # 发送thinking状态
@@ -45,17 +57,6 @@ async def chat(request: ChatRequest):
         }
         
         # 发送检索到的引用信息
-        refs_data = [
-            {
-                "ref_id": chunk.ref_id,
-                "chunk_id": chunk.id,
-                "page": chunk.page_number,
-                "bbox": chunk.bbox.model_dump(),
-                "content": chunk.content[:100] + "..." if len(chunk.content) > 100 else chunk.content
-            }
-            for chunk in chunks
-        ]
-        
         yield {
             "event": "message",
             "data": json.dumps({
@@ -91,10 +92,32 @@ async def chat(request: ChatRequest):
                     "final_refs": []
                 })
             }
+
+            # Persist this Q/A hint so it appears in chat history.
+            try:
+                ts = datetime.now(timezone.utc).isoformat()
+                user_msg = {
+                    "id": f"user_{uuid.uuid4().hex[:12]}",
+                    "role": "user",
+                    "content": request.question,
+                    "timestamp": ts,
+                }
+                assistant_msg = {
+                    "id": f"assistant_{uuid.uuid4().hex[:12]}",
+                    "role": "assistant",
+                    "content": hint,
+                    "timestamp": ts,
+                    "references": [],
+                }
+                document_store.append_chat(doc_id, user_msg, assistant_msg)
+            except Exception as e:
+                print(f"[CHAT_STORE] Failed to persist hint: {e}")
+
             return
         
         # 2. 流式生成回答
         all_refs = set()
+        assistant_text = ""
         
         async for chunk in llm_router.chat_stream(
             question=request.question,
@@ -104,6 +127,7 @@ async def chat(request: ChatRequest):
             deepseek_api_key=request.deepseek_api_key
         ):
             if chunk["type"] == "content":
+                assistant_text += chunk["content"]
                 # 收集所有引用
                 for ref in chunk.get("active_refs", []):
                     all_refs.add(ref)
@@ -118,6 +142,26 @@ async def chat(request: ChatRequest):
                 }
             
             elif chunk["type"] == "done":
+                # Persist chat history on completion.
+                try:
+                    ts = datetime.now(timezone.utc).isoformat()
+                    user_msg = {
+                        "id": f"user_{uuid.uuid4().hex[:12]}",
+                        "role": "user",
+                        "content": request.question,
+                        "timestamp": ts,
+                    }
+                    assistant_msg = {
+                        "id": f"assistant_{uuid.uuid4().hex[:12]}",
+                        "role": "assistant",
+                        "content": assistant_text,
+                        "timestamp": ts,
+                        "references": refs_data,
+                    }
+                    document_store.append_chat(doc_id, user_msg, assistant_msg)
+                except Exception as e:
+                    print(f"[CHAT_STORE] Failed to persist chat: {e}")
+
                 yield {
                     "event": "message",
                     "data": json.dumps({
@@ -138,10 +182,18 @@ async def chat(request: ChatRequest):
     return EventSourceResponse(event_generator())
 
 
+@router.get("/documents/{doc_id}/chat_history")
+async def get_chat_history(doc_id: str):
+    """Return persisted chat history for a document."""
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="文档不存在")
+    return document_store.load_chat(doc_id)
+
+
 @router.get("/documents/{doc_id}/chunks")
 async def get_chunks(doc_id: str, page: int = None):
     """获取文档的所有文本块（用于调试）"""
-    if doc_id not in documents:
+    if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
     
     # 使用空查询检索所有

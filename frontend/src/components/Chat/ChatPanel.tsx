@@ -1,23 +1,22 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useDocumentStore } from '../../stores/documentStore';
 import { useVectorSearch } from '../../hooks/useVectorSearch';
 import { MessageItem } from './MessageItem';
 import './ChatPanel.css';
 
 export const ChatPanel: React.FC = () => {
-    const { messages, isLoading, currentDocument } = useDocumentStore();
+    const { messages, isLoading, currentDocument, clearMessages, clearHighlights } = useDocumentStore();
     const { askQuestion } = useVectorSearch();
 
     const [inputValue, setInputValue] = useState('');
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
 
-    // 自动滚动到最新消息
+    // 自动滚动到底部
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
-    // 处理发送
     const handleSend = async () => {
         const question = inputValue.trim();
         if (!question || isLoading || !currentDocument) return;
@@ -31,7 +30,6 @@ export const ChatPanel: React.FC = () => {
         }
     };
 
-    // 处理键盘事件
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
@@ -39,7 +37,6 @@ export const ChatPanel: React.FC = () => {
         }
     };
 
-    // 快捷问题
     const quickQuestions = [
         '这份文档的主要内容是什么？',
         '总结第一页的要点',
@@ -48,30 +45,22 @@ export const ChatPanel: React.FC = () => {
 
     return (
         <div className="chat-panel">
-            {/* 头部 */}
             <div className="chat-header">
-                <h3>📝 智能问答</h3>
-                {currentDocument && (
-                    <span className="doc-name">{currentDocument.name}</span>
-                )}
+                <h3>📄 智能问答</h3>
+                {currentDocument && <span className="doc-name">{currentDocument.name}</span>}
             </div>
 
-            {/* 消息列表 */}
             <div className="chat-messages">
                 {messages.length === 0 ? (
                     <div className="chat-empty">
                         <div className="empty-icon">💬</div>
-                        <p>开始提问，AI将根据文档内容回答</p>
+                        <p>开始提问，AI 将根据文档内容回答</p>
 
                         {currentDocument && (
                             <div className="quick-questions">
                                 <p className="quick-title">快捷提问：</p>
                                 {quickQuestions.map((q, i) => (
-                                    <button
-                                        key={i}
-                                        className="quick-btn"
-                                        onClick={() => setInputValue(q)}
-                                    >
+                                    <button key={i} className="quick-btn" onClick={() => setInputValue(q)}>
                                         {q}
                                     </button>
                                 ))}
@@ -88,30 +77,42 @@ export const ChatPanel: React.FC = () => {
                 )}
             </div>
 
-            {/* 输入区域 */}
             <div className="chat-input-container">
-                <textarea
-                    ref={inputRef}
-                    className="chat-input"
-                    value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder={currentDocument ? '输入问题，按 Enter 发送...' : '请先上传PDF文档'}
-                    disabled={!currentDocument || isLoading}
-                    rows={2}
-                />
-                <button
-                    className="send-btn"
-                    onClick={handleSend}
-                    disabled={!inputValue.trim() || isLoading || !currentDocument}
-                >
-                    {isLoading ? (
-                        <span className="loading-dots">...</span>
-                    ) : (
-                        <span>发送</span>
-                    )}
-                </button>
+                <div className="chat-options">
+                    <button
+                        className="clear-context-btn"
+                        onClick={() => {
+                            clearMessages();
+                            clearHighlights();
+                        }}
+                        disabled={!currentDocument || isLoading}
+                        title="清空右侧聊天窗口（不会删除后端保存的历史）"
+                    >
+                        清空上下文
+                    </button>
+                </div>
+
+                <div className="chat-input-row">
+                    <textarea
+                        ref={inputRef}
+                        className="chat-input"
+                        value={inputValue}
+                        onChange={(e) => setInputValue(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        placeholder={currentDocument ? '输入问题，按 Enter 发送...' : '请先上传 PDF 文档'}
+                        disabled={!currentDocument || isLoading}
+                        rows={2}
+                    />
+                    <button
+                        className="send-btn"
+                        onClick={handleSend}
+                        disabled={!inputValue.trim() || isLoading || !currentDocument}
+                    >
+                        {isLoading ? <span className="loading-dots">...</span> : <span>发送</span>}
+                    </button>
+                </div>
             </div>
         </div>
     );
 };
+

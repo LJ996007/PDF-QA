@@ -9,7 +9,7 @@ from app.models.schemas import OCRResponse
 from app.services.baidu_ocr import baidu_ocr_gateway
 from app.services.local_ocr import local_ocr_gateway
 from app.services.rag_engine import rag_engine
-from app.routers.documents import documents
+from app.routers.documents import documents, ensure_document_loaded
 
 
 router = APIRouter()
@@ -20,10 +20,12 @@ async def ocr_page(doc_id: str, page_num: int):
     """
     按需OCR指定页面
     """
-    if doc_id not in documents:
+    if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
     
     doc = documents[doc_id]
+    if not doc.get("file_path"):
+        raise HTTPException(status_code=400, detail="该文档未保留PDF文件（KEEP_PDF=0），无法执行按需OCR。")
     
     if page_num < 1 or page_num > doc["total_pages"]:
         raise HTTPException(status_code=400, detail="页码超出范围")

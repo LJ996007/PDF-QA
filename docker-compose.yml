@@ -14,10 +14,12 @@ services:
       - MAX_PDF_SIZE=50MB
       - CHUNK_SIZE=500
       - CHUNK_OVERLAP=50
+      - KEEP_PDF=${KEEP_PDF:-1}
     volumes:
       - ./backend/chroma_db:/app/chroma_db
       - ./backend/uploads:/app/uploads
       - ./backend/thumbnails:/app/thumbnails
+      - ./backend/doc_store:/app/doc_store
     restart: unless-stopped
 
   frontend:
@@ -34,3 +36,4 @@ volumes:
   chroma_db:
   uploads:
   thumbnails:
+  doc_store:

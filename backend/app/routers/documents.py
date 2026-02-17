@@ -5,11 +5,15 @@ import os
 import uuid
 import asyncio
 import logging
+import hashlib
+from datetime import datetime, timezone
 from typing import Dict, Optional, List
-from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, HTTPException, Response
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.encoders import jsonable_encoder
 from sse_starlette.sse import EventSourceResponse
 import json
+from pydantic import BaseModel
 
 from app.models.schemas import DocumentUploadResponse, ProgressEvent
 from app.services.parser import process_document, get_ocr_required_pages
@@ -17,6 +21,7 @@ from app.services.rag_engine import rag_engine
 from app.services.ocr_gateway import ocr_gateway
 from app.services.baidu_ocr import baidu_ocr_gateway
 from app.services.local_ocr import local_ocr_gateway
+from app.services.document_store import document_store
 
 # 配置日志
 logging.basicConfig(level=logging.DEBUG)
@@ -30,20 +35,96 @@ document_progress: Dict[str, ProgressEvent] = {}
 # 存储文档信息
 documents: Dict[str, dict] = {}
 
+KEEP_PDF = os.getenv("KEEP_PDF", "1").strip().lower() in ("1", "true", "yes", "y")
+
+
+def _now_iso_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _safe_abspath(path: str) -> str:
+    # Resolve relative paths against current working directory.
+    return os.path.abspath(path)
+
+
+def _is_allowed_pdf_path(path: str) -> bool:
+    if not path:
+        return False
+    ap = _safe_abspath(path)
+    uploads_dir = _safe_abspath("uploads")
+    doc_store_dir = _safe_abspath("doc_store")
+    for base in (uploads_dir, doc_store_dir):
+        if ap == base:
+            return True
+        if ap.startswith(base + os.sep):
+            return True
+    return False
+
+
+def _resolve_pdf_path(doc_id: str) -> Optional[str]:
+    path = (documents.get(doc_id) or {}).get("file_path")
+    if not path:
+        meta = document_store.get_by_doc_id(doc_id)
+        path = meta.get("pdf_path") if meta else None
+    if not path:
+        return None
+    if not _is_allowed_pdf_path(path):
+        return None
+    if not os.path.exists(path):
+        return None
+    return path
+
+
+def _load_doc_meta_into_memory(meta: dict) -> None:
+    doc_id = meta.get("doc_id")
+    if not doc_id:
+        return
+
+    # Minimal in-memory record so /api/chat and /api/documents/{doc_id} work after restart.
+    documents[doc_id] = {
+        "id": doc_id,
+        "name": meta.get("filename") or meta.get("name") or doc_id,
+        "total_pages": int(meta.get("total_pages") or 0),
+        "ocr_required_pages": list(meta.get("ocr_required_pages") or []),
+        "thumbnails": [],
+        "file_path": meta.get("pdf_path"),  # may be None when KEEP_PDF=0
+        "pages": [],  # not persisted
+    }
+
+
+def load_persisted_documents() -> None:
+    for meta in document_store.list_docs():
+        if meta.get("status") == "completed":
+            _load_doc_meta_into_memory(meta)
+
+
+def ensure_document_loaded(doc_id: str) -> bool:
+    if doc_id in documents:
+        return True
+    meta = document_store.get_by_doc_id(doc_id)
+    if meta and meta.get("status") == "completed":
+        _load_doc_meta_into_memory(meta)
+        return True
+    return False
+
 
 async def process_document_async(
     doc_id: str, 
     file_path: str, 
     filename: str,
+    sha256: str,
+    created_at: str,
     api_key: Optional[str] = None,
     ocr_model: str = "glm-4v-flash",
     ocr_provider: str = "zhipu",
     baidu_ocr_url: Optional[str] = None,
-    baidu_ocr_token: Optional[str] = None
+    baidu_ocr_token: Optional[str] = None,
+    keep_pdf: bool = KEEP_PDF,
 ):
     """后台处理文档，支持智谱和百度两种OCR提供商"""
     logger.info(f"[DOC] Starting processing for {doc_id}, file: {filename}, ocr_provider: {ocr_provider}")
     try:
+        ocr_payload = {"doc_id": doc_id, "sha256": sha256, "pages": []}
+
         # 阶段1：提取文本
         document_progress[doc_id] = ProgressEvent(
             stage="extracting",
@@ -103,6 +184,7 @@ async def process_document_async(
                             print(f"[DEBUG] Starting OCR for page {page.page_number}")
                             
                             chunks = []
+                            provider_used = None
 
                             # Prefer Baidu PP-OCR when possible; fallback to local OCR if auth fails or
                             # if the provider returns no result.
@@ -116,6 +198,8 @@ async def process_document_async(
                                         api_url=baidu_ocr_url,
                                         token=baidu_ocr_token
                                     )
+                                    if chunks:
+                                        provider_used = "baidu"
                                 except PermissionError as e:
                                     force_local_ocr = True
                                     logger.error(f"[DOC] Baidu OCR auth failed: {e}. Falling back to local OCR.")
@@ -129,8 +213,20 @@ async def process_document_async(
                                     pdf_width,
                                     pdf_height
                                 )
+                                if chunks:
+                                    provider_used = "local"
 
                             print(f"[DEBUG] OCR returned {len(chunks)} chunks")
+
+                            ocr_payload["pages"].append({
+                                "page_number": page.page_number,
+                                "provider": provider_used or ("local" if force_local_ocr else "baidu"),
+                                "chunks": [
+                                    {"text": c.text, "bbox": c.bbox.model_dump() if c.bbox else None}
+                                    for c in (chunks or [])
+                                ],
+                                "merged_text": "\n".join([c.text for c in (chunks or [])]).strip(),
+                            })
                             
                             # 更新页面内容
                             if chunks:
@@ -178,6 +274,24 @@ async def process_document_async(
 
         if chunk_count == 0:
             # This usually happens when the PDF is image-only and OCR failed/misconfigured.
+            try:
+                document_store.upsert_doc({
+                    "doc_id": doc_id,
+                    "sha256": sha256,
+                    "filename": filename,
+                    "created_at": created_at,
+                    "total_pages": total_pages,
+                    "ocr_required_pages": get_ocr_required_pages(pages),
+                    "status": "failed",
+                    "chunk_count": 0,
+                    "keep_pdf": bool(keep_pdf),
+                    "pdf_path": file_path if keep_pdf else None,
+                })
+                if ocr_payload.get("pages"):
+                    document_store.save_ocr_result(doc_id, ocr_payload)
+            except Exception as e:
+                logger.warning(f"[DOC_STORE] Failed to persist failed doc meta: {e}")
+
             document_progress[doc_id] = ProgressEvent(
                 stage="failed",
                 current=0,
@@ -202,7 +316,7 @@ async def process_document_async(
         # 或者我们应该在这里更新type="native" (伪装)?
         # 暂时保持不变，前端可能用到。
         ocr_required_pages = get_ocr_required_pages(pages)
-        
+
         # 保存文档信息
         documents[doc_id] = {
             "id": doc_id,
@@ -213,6 +327,33 @@ async def process_document_async(
             "file_path": file_path,
             "pages": pages
         }
+
+        # Persist metadata + OCR results for history reuse.
+        try:
+            document_store.upsert_doc({
+                "doc_id": doc_id,
+                "sha256": sha256,
+                "filename": filename,
+                "created_at": created_at,
+                "total_pages": total_pages,
+                "ocr_required_pages": ocr_required_pages,
+                "status": "completed",
+                "chunk_count": int(chunk_count),
+                "keep_pdf": bool(keep_pdf),
+                "pdf_path": file_path if keep_pdf else None,
+            })
+            document_store.save_ocr_result(doc_id, ocr_payload)
+        except Exception as e:
+            logger.warning(f"[DOC_STORE] Failed to persist document: {e}")
+
+        # Default behavior: do not keep the uploaded PDF after indexing.
+        if not keep_pdf:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    documents[doc_id]["file_path"] = None
+            except Exception as e:
+                logger.warning(f"[DOC] Failed to remove temporary PDF: {e}")
         
         # 完成
         document_progress[doc_id] = ProgressEvent(
@@ -227,6 +368,18 @@ async def process_document_async(
         print(f"Error processing document: {e}")
         import traceback
         traceback.print_exc()
+        try:
+            document_store.upsert_doc({
+                "doc_id": doc_id,
+                "sha256": sha256,
+                "filename": filename,
+                "created_at": created_at,
+                "status": "failed",
+                "keep_pdf": bool(keep_pdf),
+                "pdf_path": file_path if keep_pdf else None,
+            })
+        except Exception:
+            pass
         document_progress[doc_id] = ProgressEvent(
             stage="failed",
             current=0,
@@ -249,19 +402,54 @@ async def upload_document(
     """上传PDF文档"""
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="只支持PDF文件")
-    
-    # 生成文档ID
-    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
-    
-    # 保存文件
+
+    content = await file.read()
+    sha256 = hashlib.sha256(content).hexdigest()
+
+    existing = document_store.get_by_sha256(sha256)
+    if existing and existing.get("status") == "completed":
+        doc_id = existing.get("doc_id")
+        if doc_id:
+            ensure_document_loaded(doc_id)
+            # Make sure progress SSE can immediately complete.
+            document_progress[doc_id] = ProgressEvent(
+                stage="completed",
+                current=100,
+                total=100,
+                message="Completed (cached)",
+                document_id=doc_id,
+            )
+            return DocumentUploadResponse(
+                document_id=doc_id,
+                status="completed",
+                total_pages=int(existing.get("total_pages") or 0),
+                ocr_required_pages=list(existing.get("ocr_required_pages") or []),
+                progress_url=f"/api/documents/{doc_id}/progress",
+            )
+
+    # Reuse doc_id if we have an incomplete record for the same sha256; otherwise create a new one.
+    doc_id = (existing.get("doc_id") if existing else None) or f"doc_{uuid.uuid4().hex[:12]}"
+    created_at = (existing.get("created_at") if existing else None) or _now_iso_utc()
+
+    # Save file (temporary when KEEP_PDF=0).
     upload_dir = "uploads"
     os.makedirs(upload_dir, exist_ok=True)
     file_path = os.path.join(upload_dir, f"{doc_id}.pdf")
-    
-    content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
-    
+
+    # Upsert metadata for history/dedup.
+    document_store.upsert_doc({
+        "doc_id": doc_id,
+        "sha256": sha256,
+        "filename": file.filename,
+        "created_at": created_at,
+        "status": "processing",
+        "chunk_count": int(existing.get("chunk_count") or 0) if existing else 0,
+        "keep_pdf": bool(KEEP_PDF),
+        "pdf_path": file_path if KEEP_PDF else None,
+    })
+
     # 初始化进度
     document_progress[doc_id] = ProgressEvent(
         stage="extracting",
@@ -283,11 +471,14 @@ async def upload_document(
         doc_id, 
         file_path, 
         file.filename,
+        sha256,
+        created_at,
         zhipu_api_key,
         ocr_model,
         ocr_provider,
         baidu_ocr_url,
-        baidu_ocr_token
+        baidu_ocr_token,
+        KEEP_PDF,
     )
     
     return DocumentUploadResponse(
@@ -329,10 +520,45 @@ async def get_progress(doc_id: str):
     return EventSourceResponse(event_generator())
 
 
+@router.get("/history")
+async def get_history():
+    """List persisted documents for history reuse."""
+    items = []
+    for meta in document_store.list_docs():
+        pdf_path = meta.get("pdf_path")
+        has_pdf = bool(pdf_path and os.path.exists(str(pdf_path)))
+        items.append({
+            "doc_id": meta.get("doc_id"),
+            "filename": meta.get("filename"),
+            "created_at": meta.get("created_at"),
+            "total_pages": int(meta.get("total_pages") or 0),
+            "ocr_required_pages": list(meta.get("ocr_required_pages") or []),
+            "sha256": meta.get("sha256"),
+            "status": meta.get("status"),
+            "keep_pdf": bool(meta.get("keep_pdf")),
+            "has_pdf": has_pdf,
+        })
+    return items
+
+
+class LookupRequest(BaseModel):
+    sha256: str
+
+
+@router.post("/lookup")
+async def lookup_document(request: LookupRequest):
+    """Lookup an existing document by PDF sha256 (no file upload required)."""
+    sha256 = (request.sha256 or "").strip().lower()
+    meta = document_store.get_by_sha256(sha256)
+    if meta and meta.get("doc_id"):
+        return {"exists": True, "doc_id": meta.get("doc_id"), "status": meta.get("status")}
+    return {"exists": False}
+
+
 @router.get("/{doc_id}")
 async def get_document(doc_id: str):
     """获取文档信息"""
-    if doc_id not in documents:
+    if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
     
     doc = documents[doc_id]
@@ -345,16 +571,89 @@ async def get_document(doc_id: str):
     }
 
 
+@router.get("/{doc_id}/pdf")
+async def get_document_pdf(doc_id: str):
+    """Get the persisted PDF for a document (when KEEP_PDF=1)."""
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="文档不存在")
+    path = _resolve_pdf_path(doc_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="该文档未保存PDF")
+    return FileResponse(path, media_type="application/pdf", filename=f"{doc_id}.pdf")
+
+
+@router.head("/{doc_id}/pdf")
+async def head_document_pdf(doc_id: str):
+    """HEAD check for persisted PDF existence."""
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="文档不存在")
+    path = _resolve_pdf_path(doc_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="该文档未保存PDF")
+    # Starlette/FastAPI does not always add HEAD automatically for FileResponse; provide it explicitly.
+    return Response(status_code=200)
+
+
+@router.post("/{doc_id}/attach_pdf")
+async def attach_document_pdf(doc_id: str, file: UploadFile = File(...)):
+    """Attach/persist a PDF for an existing document (used to retrofit old KEEP_PDF=0 records)."""
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="文档不存在")
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="只支持PDF文件")
+
+    content = await file.read()
+    sha256 = hashlib.sha256(content).hexdigest()
+
+    meta = document_store.get_by_doc_id(doc_id) or {}
+    expected = (meta.get("sha256") or "").strip().lower()
+    if expected and expected != sha256:
+        raise HTTPException(status_code=400, detail="PDF与该历史记录不匹配（SHA256不同）")
+
+    upload_dir = "uploads"
+    os.makedirs(upload_dir, exist_ok=True)
+    file_path = os.path.join(upload_dir, f"{doc_id}.pdf")
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    document_store.upsert_doc({
+        "doc_id": doc_id,
+        "sha256": sha256,
+        "keep_pdf": True,
+        "pdf_path": file_path,
+    })
+
+    if doc_id in documents:
+        documents[doc_id]["file_path"] = file_path
+
+    return {"status": "ok"}
+
+
 @router.delete("/{doc_id}")
 async def delete_document(doc_id: str):
     """删除文档"""
+    if not ensure_document_loaded(doc_id):
+        # Still attempt to delete from persistent store and vector index.
+        document_store.delete_doc(doc_id)
+        document_store.delete_chat(doc_id)
+        document_store.delete_compliance(doc_id)
+        rag_engine.delete_document(doc_id)
+        if doc_id in document_progress:
+            del document_progress[doc_id]
+        return {"status": "deleted"}
+
     if doc_id in documents:
         doc = documents[doc_id]
         # 删除文件
-        if os.path.exists(doc["file_path"]):
-            os.remove(doc["file_path"])
+        file_path = doc.get("file_path")
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
         # 删除向量索引
         rag_engine.delete_document(doc_id)
+        # 删除持久化记录
+        document_store.delete_doc(doc_id)
+        document_store.delete_chat(doc_id)
+        document_store.delete_compliance(doc_id)
         # 删除记录
         del documents[doc_id]
     
@@ -362,11 +661,6 @@ async def delete_document(doc_id: str):
         del document_progress[doc_id]
     
     return {"status": "deleted"}
-    return {"status": "deleted"}
-
-
-from pydantic import BaseModel
-
 class ComplianceRequest(BaseModel):
     requirements: List[str]
     api_key: Optional[str] = None
@@ -378,7 +672,7 @@ async def check_compliance(doc_id: str, request: ComplianceRequest):
     """
     from app.services.compliance_service import compliance_service
     
-    if doc_id not in documents:
+    if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
         
     try:
@@ -387,8 +681,27 @@ async def check_compliance(doc_id: str, request: ComplianceRequest):
             request.requirements, 
             api_key=request.api_key
         )
+        payload = {
+            "version": 1,
+            "doc_id": doc_id,
+            "created_at": _now_iso_utc(),
+            "requirements": list(request.requirements or []),
+            **(results or {}),
+        }
+        document_store.save_compliance(doc_id, jsonable_encoder(payload))
         return results
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{doc_id}/compliance_history")
+async def get_compliance_history(doc_id: str):
+    """Get latest persisted compliance result for a document."""
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="鏂囨。涓嶅瓨鍦?")
+    data = document_store.load_compliance(doc_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="No compliance history")
+    return data
