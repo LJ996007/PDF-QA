@@ -9,7 +9,7 @@ interface ChatMarkdownContentProps {
     onRefClick: (refId: string, isValid: boolean) => void;
 }
 
-const REF_URL_PATTERN = /^ref:\/\/(\d+)$/;
+const REF_URL_PATTERN = /^#ref-(\d+)$/;
 
 export const ChatMarkdownContent: React.FC<ChatMarkdownContentProps> = ({
     content,

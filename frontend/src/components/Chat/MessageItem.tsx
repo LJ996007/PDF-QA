@@ -45,7 +45,8 @@ class MarkdownErrorBoundary extends React.Component<MarkdownErrorBoundaryProps, 
 }
 
 export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
-    const { setHighlights, setCurrentPage } = useDocumentStore();
+    const setHighlights = useDocumentStore((state) => state.setHighlights);
+    const setCurrentPage = useDocumentStore((state) => state.setCurrentPage);
     const [isRefsExpanded, setIsRefsExpanded] = React.useState(false);
     const validRefIds = React.useMemo(
         () => new Set(message.references.map((ref) => ref.refId)),

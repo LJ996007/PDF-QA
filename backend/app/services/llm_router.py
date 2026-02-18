@@ -131,7 +131,7 @@ class LLMRouter:
                             if content:
                                 # 提取引用标记
                                 import re
-                                refs = re.findall(r'\[ref-\d+\]', content)
+                                refs = [f"ref-{m}" for m in re.findall(r'\[ref-(\d+)\]', content)]
                                 
                                 yield {
                                     "type": "content",
@@ -176,7 +176,7 @@ class LLMRouter:
                             
                             if content:
                                 import re
-                                refs = re.findall(r'\[ref-\d+\]', content)
+                                refs = [f"ref-{m}" for m in re.findall(r'\[ref-(\d+)\]', content)]
                                 
                                 yield {
                                     "type": "content",

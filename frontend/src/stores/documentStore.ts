@@ -36,6 +36,9 @@ export interface ComplianceItem {
     references: TextChunk[];
 }
 
+export type PageOcrStatus = 'unrecognized' | 'processing' | 'recognized' | 'failed';
+export type ViewMode = 'list' | 'grid';
+
 /**
  * 文档信息
  */
@@ -44,6 +47,9 @@ export interface Document {
     name: string;
     totalPages: number;
     ocrRequiredPages: number[];
+    recognizedPages?: number[];
+    pageOcrStatus?: Record<number, PageOcrStatus>;
+    ocrMode?: 'manual' | 'full';
     thumbnails: string[];
 }
 
@@ -108,6 +114,7 @@ interface DocumentState {
     scale: number;
     currentPage: number;
     highlights: TextChunk[];
+    viewMode: ViewMode;
 
     // 对话状态
     messages: ChatMessage[];
@@ -123,6 +130,7 @@ interface DocumentState {
 
     // Actions
     setDocument: (doc: Document, pdfUrl: string | null) => void;
+    updateDocumentOcrStatus: (recognizedPages: number[], pageOcrStatus: Record<number, PageOcrStatus>) => void;
     clearDocument: () => void;
 
     // 合规性Actions
@@ -134,6 +142,7 @@ interface DocumentState {
     setHighlights: (chunks: TextChunk[]) => void;
     addHighlight: (chunk: TextChunk) => void;
     clearHighlights: () => void;
+    setViewMode: (mode: ViewMode) => void;
 
     // 消息
     addMessage: (message: ChatMessage) => void;
@@ -246,6 +255,7 @@ export const useDocumentStore = create<DocumentState>()(
             scale: 1.0,
             currentPage: 1,
             highlights: [],
+            viewMode: 'list',
             messages: [],
             isLoading: false,
             config: initializeConfig(),
@@ -266,6 +276,13 @@ export const useDocumentStore = create<DocumentState>()(
                 state.complianceResults = [];
                 state.complianceMarkdown = '';
                 state.complianceRequirements = '';
+            }),
+
+            updateDocumentOcrStatus: (recognizedPages, pageOcrStatus) => set((state) => {
+                if (state.currentDocument) {
+                    state.currentDocument.recognizedPages = recognizedPages;
+                    state.currentDocument.pageOcrStatus = pageOcrStatus;
+                }
             }),
 
             clearDocument: () => set((state) => {
@@ -310,6 +327,10 @@ export const useDocumentStore = create<DocumentState>()(
 
             clearHighlights: () => set((state) => {
                 state.highlights = [];
+            }),
+
+            setViewMode: (mode) => set((state) => {
+                state.viewMode = mode;
             }),
 
             // 消息操作

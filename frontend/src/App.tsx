@@ -4,6 +4,7 @@ import { ChatPanel } from './components/Chat';
 import { CompliancePanel } from './components/Compliance/CompliancePanel';
 import { Settings } from './components/Settings';
 import { useDocumentStore } from './stores/documentStore';
+import type { PageOcrStatus } from './stores/documentStore';
 import { useVectorSearch } from './hooks/useVectorSearch';
 import type { HistoryDocumentItem } from './hooks/useVectorSearch';
 import { sha256File } from './utils/hash';
@@ -22,8 +23,9 @@ function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const attachInputRef = useRef<HTMLInputElement>(null);
   const attachTargetRef = useRef<{ docId: string; sha256: string } | null>(null);
+  const [pendingUploadFile, setPendingUploadFile] = useState<File | null>(null);
 
-  // Tab状态
+  // Tab 状态
   const [activeTab, setActiveTab] = useState<'chat' | 'compliance'>('chat');
 
   // 分隔条状态
@@ -48,8 +50,21 @@ function App() {
     refreshHistory();
   }, [refreshHistory]);
 
+  const mapPageStatus = (
+    value: Record<string, PageOcrStatus> | Record<number, PageOcrStatus> | undefined
+  ): Record<number, PageOcrStatus> => {
+    const output: Record<number, PageOcrStatus> = {};
+    Object.entries(value || {}).forEach(([key, status]) => {
+      const page = Number(key);
+      if (!Number.isNaN(page)) {
+        output[page] = status;
+      }
+    });
+    return output;
+  };
+
   // 处理文件上传
-  const handleFileUpload = useCallback(async (file: File) => {
+  const handleFileUpload = useCallback(async (file: File, ocrMode: 'manual' | 'full') => {
     if (!file.name.toLowerCase().endsWith('.pdf')) {
       alert('请上传PDF文件');
       return;
@@ -74,8 +89,11 @@ function App() {
               id: doc.id,
               name: doc.name,
               totalPages: doc.total_pages,
-              ocrRequiredPages: doc.ocr_required_pages,
-              thumbnails: doc.thumbnails,
+              ocrRequiredPages: doc.ocr_required_pages || [],
+              recognizedPages: doc.recognized_pages || [],
+              pageOcrStatus: mapPageStatus(doc.page_ocr_status),
+              ocrMode: doc.ocr_mode || 'manual',
+              thumbnails: doc.thumbnails || [],
             },
             url
           );
@@ -88,7 +106,7 @@ function App() {
 
       setUploadProgress('正在上传...');
       // 上传文件
-      const docId = await uploadDocument(file);
+      const docId = await uploadDocument(file, ocrMode);
       if (!docId) {
         throw new Error('上传失败');
       }
@@ -112,14 +130,23 @@ function App() {
                   id: doc.id,
                   name: doc.name,
                   totalPages: doc.total_pages,
-                  ocrRequiredPages: doc.ocr_required_pages,
-                  thumbnails: doc.thumbnails,
+                  ocrRequiredPages: doc.ocr_required_pages || [],
+                  recognizedPages: doc.recognized_pages || [],
+                  pageOcrStatus: mapPageStatus(doc.page_ocr_status),
+                  ocrMode: doc.ocr_mode || ocrMode,
+                  thumbnails: doc.thumbnails || [],
                 },
                 url
               );
+
+              if ((doc.ocr_mode || ocrMode) === 'manual') {
+                setUploadProgress('文档已加载，可缩小页面后多选识别。');
+                setTimeout(() => setUploadProgress(null), 2500);
+              } else {
+                setUploadProgress(null);
+              }
             }
           });
-          refreshHistory();
           unwatch();
         } else if (progress.stage === 'failed') {
           setUploadProgress(`处理失败: ${progress.message}`);
@@ -130,6 +157,22 @@ function App() {
       setUploadProgress(`上传失败: ${error instanceof Error ? error.message : '未知错误'}`);
     }
   }, [uploadDocument, watchProgress, getDocument, setDocument, lookupDocument, pdfUrl, refreshHistory]);
+
+  const beginUploadChoice = useCallback((file: File) => {
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      alert('请上传PDF文件');
+      return;
+    }
+    setPendingUploadFile(file);
+  }, []);
+
+  const handleUploadModeConfirm = useCallback((ocrMode: 'manual' | 'full') => {
+    const file = pendingUploadFile;
+    setPendingUploadFile(null);
+    if (file) {
+      handleFileUpload(file, ocrMode);
+    }
+  }, [pendingUploadFile, handleFileUpload]);
 
   // 处理拖放
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -148,17 +191,18 @@ function App() {
 
     const file = e.dataTransfer.files[0];
     if (file) {
-      handleFileUpload(file);
+      beginUploadChoice(file);
     }
-  }, [handleFileUpload]);
+  }, [beginUploadChoice]);
 
   // 处理文件选择
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      handleFileUpload(file);
+      beginUploadChoice(file);
     }
-  }, [handleFileUpload]);
+    e.target.value = '';
+  }, [beginUploadChoice]);
 
   // 关闭文档
   const handleCloseDocument = useCallback(() => {
@@ -192,8 +236,11 @@ function App() {
             id: doc.id,
             name: doc.name,
             totalPages: doc.total_pages,
-            ocrRequiredPages: doc.ocr_required_pages,
-            thumbnails: doc.thumbnails,
+            ocrRequiredPages: doc.ocr_required_pages || [],
+            recognizedPages: doc.recognized_pages || [],
+            pageOcrStatus: mapPageStatus(doc.page_ocr_status),
+            ocrMode: doc.ocr_mode || 'manual',
+            thumbnails: doc.thumbnails || [],
           },
           pdf
         );
@@ -209,7 +256,7 @@ function App() {
       }
 
       if (!pdf) {
-        alert('\u8be5\u5386\u53f2\u8bb0\u5f55\u672a\u4fdd\u5b58 PDF\uff08\u53ef\u80fd\u662f\u4e4b\u524d KEEP_PDF=0 \u521b\u5efa\u7684\uff09\u3002\u5982\u9700\u540e\u7eed\u81ea\u52a8\u52a0\u8f7d PDF\uff0c\u8bf7\u70b9\u51fb\u8be5\u6761\u76ee\u7684\u201c\u8865\u9f50PDF\u201d\u3002');
+        alert('该历史记录未保存 PDF（可能是之前 KEEP_PDF=0 创建的）。如需后续自动加载 PDF，请点击该条目的“补齐PDF”。');
       }
     } catch (e) {
       alert(e instanceof Error ? e.message : 'Failed to open history');
@@ -264,8 +311,11 @@ function App() {
             id: doc.id,
             name: doc.name,
             totalPages: doc.total_pages,
-            ocrRequiredPages: doc.ocr_required_pages,
-            thumbnails: doc.thumbnails,
+            ocrRequiredPages: doc.ocr_required_pages || [],
+            recognizedPages: doc.recognized_pages || [],
+            pageOcrStatus: mapPageStatus(doc.page_ocr_status),
+            ocrMode: doc.ocr_mode || 'manual',
+            thumbnails: doc.thumbnails || [],
           },
           url
         );
@@ -274,8 +324,24 @@ function App() {
       // Persist the PDF to backend so next time "打开(聊天)" can auto-load it.
       const attached = await attachPdf(target.docId, file);
       if (!attached) {
-        alert('已加载本地PDF，但保存到后台失败。');
+        alert('已加载本地PDF，但保存到后端失败。');
       } else {
+        const latestDoc = await getDocument(target.docId);
+        if (latestDoc) {
+          setDocument(
+            {
+              id: latestDoc.id,
+              name: latestDoc.name,
+              totalPages: latestDoc.total_pages,
+              ocrRequiredPages: latestDoc.ocr_required_pages || [],
+              recognizedPages: latestDoc.recognized_pages || [],
+              pageOcrStatus: mapPageStatus(latestDoc.page_ocr_status),
+              ocrMode: latestDoc.ocr_mode || 'manual',
+              thumbnails: latestDoc.thumbnails || [],
+            },
+            url
+          );
+        }
         refreshHistory();
       }
     } catch (err) {
@@ -354,7 +420,7 @@ function App() {
         >
           {!pdfUrl ? (
             <div className="upload-area">
-              <div className="upload-icon">📁</div>
+              <div className="upload-icon">📤</div>
               <h2>上传PDF文档</h2>
               <p>拖放文件到此处，或点击选择文件</p>
 
@@ -404,7 +470,7 @@ function App() {
                               className="history-btn secondary"
                               onClick={() => handleAttachPdfClick(d.doc_id, d.sha256)}
                             >
-                              {'\u8865\u9f50PDF'}
+                              {'补齐PDF'}
                             </button>
                           )}
                           <button
@@ -477,7 +543,23 @@ function App() {
         </div>
       </main>
 
-      {/* 设置弹窗 */}
+      {/* 上传模式弹窗 */}
+      {pendingUploadFile && (
+        <div className="upload-choice-overlay">
+          <div className="upload-choice-modal">
+            <h3>上传模式</h3>
+            <p>是否在上传后对全部页面执行 OCR 识别？</p>
+            <div className="upload-choice-actions">
+              <button autoFocus onClick={() => handleUploadModeConfirm('manual')}>
+                否，仅加载
+              </button>
+              <button onClick={() => handleUploadModeConfirm('full')}>
+                是，全部识别
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <Settings isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
     </div>
   );

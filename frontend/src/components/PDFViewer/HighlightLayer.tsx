@@ -14,16 +14,6 @@ export const HighlightLayer: React.FC<HighlightLayerProps> = memo(({
     pageHeight,
     scale,
 }) => {
-    // 调试日志
-    if (highlights.length > 0) {
-        console.log('[HighlightLayer] Debug Info:', {
-            pageWidth,
-            pageHeight,
-            scale,
-            firstHighlight: highlights[0]?.bbox,
-        });
-    }
-
     return (
         <svg
             className="highlight-layer"
@@ -32,7 +22,6 @@ export const HighlightLayer: React.FC<HighlightLayerProps> = memo(({
             viewBox={`0 0 ${pageWidth} ${pageHeight}`}
         >
             {highlights.map((chunk) => {
-                // 验证bbox有效性
                 if (!chunk.bbox ||
                     typeof chunk.bbox.x !== 'number' ||
                     typeof chunk.bbox.y !== 'number' ||
@@ -43,9 +32,6 @@ export const HighlightLayer: React.FC<HighlightLayerProps> = memo(({
                     return null;
                 }
 
-                // 后端返回的坐标已经是 72 DPI 的 PDF 坐标
-                // 但 Y 坐标原点在图像左上角（与CSS相同），不需要翻转
-                // 直接乘以当前缩放比例即可
                 const rect = {
                     x: chunk.bbox.x * scale,
                     y: chunk.bbox.y * scale,
@@ -53,27 +39,17 @@ export const HighlightLayer: React.FC<HighlightLayerProps> = memo(({
                     height: chunk.bbox.h * scale,
                 };
 
-                // 调试：打印坐标转换结果
-                console.log('[HighlightLayer] Coordinate Transform:', {
-                    input: { bbox: chunk.bbox, scale },
-                    output: rect,
-                });
-
-                // 跳过超出页面范围的高亮
                 if (rect.x < 0 || rect.y < 0 ||
                     rect.x > pageWidth || rect.y > pageHeight ||
                     rect.width <= 0 || rect.height <= 0) {
-                    console.log('[HighlightLayer] Skipping out-of-bounds highlight');
                     return null;
                 }
 
-                // 提取引用数字
                 const refNumStr = chunk.ref_id || chunk.refId || '';
                 const refNumber = refNumStr.replace('ref-', '') || '?';
 
                 return (
                     <g key={chunk.id}>
-                        {/* 高亮矩形 */}
                         <rect
                             className="highlight-rect"
                             x={rect.x}
@@ -86,7 +62,6 @@ export const HighlightLayer: React.FC<HighlightLayerProps> = memo(({
                             <title>{chunk.content?.substring(0, 100) || ''}...</title>
                         </rect>
 
-                        {/* 引用标签 - 移到高亮右侧，避免遮挡内容 */}
                         <g transform={`translate(${rect.x + rect.width + 6}, ${Math.max(0, rect.y - 8)})`}>
                             <rect
                                 x={0}

@@ -184,9 +184,10 @@ export function useVectorSearch() {
     );
 
     const uploadDocument = useCallback(
-        async (file: File): Promise<string | null> => {
+        async (file: File, ocrMode: 'manual' | 'full' = 'manual'): Promise<string | null> => {
             const formData = new FormData();
             formData.append('file', file);
+            formData.append('ocr_mode', ocrMode);
 
             if (config.zhipuApiKey) {
                 formData.append('zhipu_api_key', config.zhipuApiKey);

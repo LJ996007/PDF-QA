@@ -1,7 +1,7 @@
-﻿import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 
-// 閰嶇疆PDF.js worker
+// 配置 PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
 
 export interface PDFLoadResult {
@@ -26,20 +26,20 @@ export function usePdfLoader() {
     const pagesCacheRef = useRef<Map<number, pdfjsLib.PDFPageProxy>>(new Map());
 
     /**
-     * 鍔犺浇PDF鏂囨。
+     * 加载 PDF 文档。
      */
     const loadDocument = useCallback(async (source: string | ArrayBuffer): Promise<PDFLoadResult | null> => {
         setLoadingState({ isLoading: true, progress: 0, error: null });
 
         try {
-            // 娓呯悊涔嬪墠鐨勬枃妗?
+            // 清理之前的文档
             if (pdfDocRef.current) {
                 await pdfDocRef.current.destroy();
                 pdfDocRef.current = null;
                 pagesCacheRef.current.clear();
             }
 
-            // 鍔犺浇鏂版枃妗?
+            // 加载新文档
             const loadingTask = pdfjsLib.getDocument(source);
 
             loadingTask.onProgress = (progress: { loaded: number; total: number }) => {
@@ -59,7 +59,7 @@ export function usePdfLoader() {
             return {
                 numPages: pdfDoc.numPages,
                 getPage: async (pageNum: number) => {
-                    // 浣跨敤缂撳瓨
+                    // 优先复用缓存页，避免重复解码
                     if (pagesCacheRef.current.has(pageNum)) {
                         return pagesCacheRef.current.get(pageNum)!;
                     }
@@ -70,21 +70,21 @@ export function usePdfLoader() {
                 },
             };
         } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : '鍔犺浇PDF澶辫触';
+            const errorMessage = error instanceof Error ? error.message : '加载 PDF 失败';
             setLoadingState({ isLoading: false, progress: 0, error: errorMessage });
             return null;
         }
     }, []);
 
     /**
-     * 浠嶶RL鍔犺浇PDF
+     * 从 URL 加载 PDF。
      */
     const loadFromUrl = useCallback(async (url: string): Promise<PDFLoadResult | null> => {
         return loadDocument(url);
     }, [loadDocument]);
 
     /**
-     * 浠嶧ile瀵硅薄鍔犺浇PDF
+     * 从 File 对象加载 PDF。
      */
     const loadFromFile = useCallback(async (file: File): Promise<PDFLoadResult | null> => {
         const arrayBuffer = await file.arrayBuffer();
@@ -92,7 +92,7 @@ export function usePdfLoader() {
     }, [loadDocument]);
 
     /**
-     * 娓呯悊璧勬簮
+     * 释放 PDF 相关资源。
      */
     const cleanup = useCallback(async () => {
         if (pdfDocRef.current) {
@@ -109,4 +109,3 @@ export function usePdfLoader() {
         cleanup,
     };
 }
-

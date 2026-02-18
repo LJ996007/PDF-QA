@@ -434,6 +434,59 @@ body {
   background: rgba(220, 38, 38, 0.14);
 }
 
+.upload-choice-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1200;
+  padding: 16px;
+}
+
+.upload-choice-modal {
+  width: min(520px, 100%);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  box-shadow: var(--shadow-xl);
+  padding: 20px;
+}
+
+.upload-choice-modal h3 {
+  font-size: 18px;
+  margin-bottom: 8px;
+}
+
+.upload-choice-modal p {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 14px;
+}
+
+.upload-choice-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.upload-choice-actions button {
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.upload-choice-actions button:last-child {
+  background: var(--primary-color);
+  color: #fff;
+  border-color: var(--primary-color);
+}
+
 /* 全局进度覆盖层 */
 .process-overlay {
   position: absolute;

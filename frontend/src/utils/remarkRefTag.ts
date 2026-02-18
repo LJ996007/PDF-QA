@@ -15,7 +15,7 @@ function createTextNode(value: string): MarkdownNode {
 function createRefNode(refNumber: string): MarkdownNode {
     return {
         type: 'link',
-        url: `ref://${refNumber}`,
+        url: `#ref-${refNumber}`,
         title: `ref-${refNumber}`,
         children: [createTextNode(`[ref-${refNumber}]`)],
     };
