@@ -43,12 +43,33 @@
   color: var(--text-secondary, #666);
 }
 
-.viewer-mode-tag {
-  padding: 4px 8px;
-  font-size: 12px;
-  border-radius: 999px;
-  background: #e6f0ff;
-  color: #1d4ed8;
+.view-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.view-mode-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.view-mode-btn svg {
+  width: 17px;
+  height: 17px;
+  display: block;
+}
+
+.view-mode-btn.is-active {
+  color: #1d4ed8 !important;
+  border-color: #93c5fd !important;
+  background: #e6f0ff !important;
+}
+
+.view-mode-btn:not(.is-active):hover {
+  background: var(--bg-hover, #e2e8f0);
+  border-color: var(--primary-color, #2563eb);
 }
 
 .selection-indicator {
@@ -293,6 +314,16 @@
     width: 28px;
     height: 28px;
     font-size: 16px;
+  }
+
+  .view-mode-btn {
+    width: 28px;
+    height: 28px;
+  }
+
+  .view-mode-btn svg {
+    width: 15px;
+    height: 15px;
   }
 
   .ocr-run-btn {
