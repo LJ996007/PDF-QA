@@ -1,6 +1,13 @@
 import { useCallback } from 'react';
 import { useDocumentStore } from '../stores/documentStore';
-import type { ChatMessage, ComplianceItem, TextChunk } from '../stores/documentStore';
+import type {
+    ChatMessage,
+    ComplianceItem,
+    ComplianceV2Result,
+    EvidenceItem,
+    ReviewState,
+    TextChunk,
+} from '../stores/documentStore';
 
 export interface ChatStreamEvent {
     type: 'thinking' | 'references' | 'content' | 'done' | 'error';
@@ -33,6 +40,87 @@ export interface HistoryDocumentItem {
     status: string;
     has_pdf?: boolean;
 }
+
+export interface ComplianceV2Payload {
+    requirements: string[];
+    policy_set_id?: string;
+    allowed_pages?: number[];
+    api_key?: string;
+    review_required?: boolean;
+}
+
+interface RawComplianceV2Response {
+    decision?: string;
+    confidence?: number;
+    risk_level?: string;
+    summary?: string;
+    field_results?: any[];
+    rule_results?: any[];
+    evidence?: any[];
+    review_state?: any;
+    requirements?: string[];
+    allowed_pages?: number[];
+    policy_set_id?: string;
+    markdown?: string;
+    created_at?: string;
+}
+
+const mapEvidenceItem = (item: any): EvidenceItem => {
+    const page = Number(item?.page || item?.bbox?.page || 1);
+    return {
+        refId: String(item?.ref_id || item?.refId || ''),
+        page,
+        bbox: item?.bbox || { page, x: 0, y: 0, w: 100, h: 20 },
+        sourceType: (item?.source_type || item?.sourceType || 'native') as EvidenceItem['sourceType'],
+        fieldName: String(item?.field_name || item?.fieldName || ''),
+        supportLevel: (item?.support_level || item?.supportLevel || 'primary') as EvidenceItem['supportLevel'],
+        content: String(item?.content || ''),
+    };
+};
+
+const mapReviewState = (raw: any): ReviewState => ({
+    state: (raw?.state || 'pending_review') as ReviewState['state'],
+    reviewer: raw?.reviewer ? String(raw.reviewer) : undefined,
+    note: raw?.note ? String(raw.note) : undefined,
+    updatedAt: raw?.updated_at ? String(raw.updated_at) : raw?.updatedAt ? String(raw.updatedAt) : undefined,
+});
+
+const mapComplianceV2Result = (data: RawComplianceV2Response): ComplianceV2Result => {
+    const evidence = Array.isArray(data?.evidence) ? data.evidence.map(mapEvidenceItem) : [];
+    return {
+        decision: (data?.decision || 'needs_review') as ComplianceV2Result['decision'],
+        confidence: Number(data?.confidence || 0),
+        riskLevel: (data?.risk_level || 'high') as ComplianceV2Result['riskLevel'],
+        summary: String(data?.summary || ''),
+        fieldResults: Array.isArray(data?.field_results)
+            ? data.field_results.map((item) => ({
+                  fieldKey: String(item?.field_key || ''),
+                  fieldName: String(item?.field_name || ''),
+                  requirement: String(item?.requirement || ''),
+                  value: String(item?.value || ''),
+                  confidence: Number(item?.confidence || 0),
+                  status: (item?.status || 'uncertain') as ComplianceV2Result['fieldResults'][number]['status'],
+                  evidenceRefs: Array.isArray(item?.evidence_refs) ? item.evidence_refs.map((x: any) => String(x)) : [],
+              }))
+            : [],
+        ruleResults: Array.isArray(data?.rule_results)
+            ? data.rule_results.map((item) => ({
+                  ruleId: String(item?.rule_id || ''),
+                  ruleName: String(item?.rule_name || ''),
+                  status: (item?.status || 'warn') as ComplianceV2Result['ruleResults'][number]['status'],
+                  message: String(item?.message || ''),
+                  fieldNames: Array.isArray(item?.field_names) ? item.field_names.map((x: any) => String(x)) : [],
+              }))
+            : [],
+        evidence,
+        reviewState: mapReviewState(data?.review_state || {}),
+        requirements: Array.isArray(data?.requirements) ? data.requirements.map((x) => String(x)) : [],
+        allowedPages: Array.isArray(data?.allowed_pages) ? data.allowed_pages.map((x) => Number(x)) : [],
+        policySetId: String(data?.policy_set_id || 'contracts/base_rules'),
+        markdown: String(data?.markdown || ''),
+        createdAt: data?.created_at ? String(data.created_at) : undefined,
+    };
+};
 
 export function useVectorSearch() {
     const {
@@ -445,6 +533,91 @@ export function useVectorSearch() {
         [API_BASE]
     );
 
+    const checkComplianceV2 = useCallback(
+        async (docId: string, payload: ComplianceV2Payload): Promise<ComplianceV2Result | null> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}/compliance/v2`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        requirements: payload.requirements || [],
+                        policy_set_id: payload.policy_set_id || 'contracts/base_rules',
+                        allowed_pages: payload.allowed_pages || [],
+                        api_key: payload.api_key,
+                        review_required: payload.review_required !== false,
+                    }),
+                });
+                if (!resp.ok) {
+                    const txt = await resp.text();
+                    throw new Error(txt || 'compliance v2 failed');
+                }
+                const data = (await resp.json()) as RawComplianceV2Response;
+                return mapComplianceV2Result(data);
+            } catch (e) {
+                console.error('checkComplianceV2错误:', e);
+                return null;
+            }
+        },
+        [API_BASE]
+    );
+
+    const getComplianceV2History = useCallback(
+        async (docId: string): Promise<ComplianceV2Result | null> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}/compliance_v2_history`);
+                if (resp.status === 404) return null;
+                if (!resp.ok) throw new Error('compliance_v2_history failed');
+                const data = (await resp.json()) as RawComplianceV2Response;
+                return mapComplianceV2Result(data);
+            } catch (e) {
+                console.error('getComplianceV2History错误:', e);
+                return null;
+            }
+        },
+        [API_BASE]
+    );
+
+    const getEvidence = useCallback(
+        async (docId: string): Promise<EvidenceItem[]> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}/evidence`);
+                if (resp.status === 404) return [];
+                if (!resp.ok) throw new Error('evidence fetch failed');
+                const data = await resp.json();
+                const evidenceRaw = Array.isArray(data?.evidence) ? data.evidence : [];
+                return evidenceRaw.map(mapEvidenceItem);
+            } catch (e) {
+                console.error('getEvidence错误:', e);
+                return [];
+            }
+        },
+        [API_BASE]
+    );
+
+    const submitReviewDecision = useCallback(
+        async (
+            docId: string,
+            decision: 'approved' | 'rejected' | 'pending_review',
+            reviewer?: string,
+            note?: string
+        ): Promise<ReviewState | null> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}/review/submit`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ decision, reviewer, note }),
+                });
+                if (!resp.ok) throw new Error('submit review failed');
+                const data = await resp.json();
+                return mapReviewState(data?.review_state || {});
+            } catch (e) {
+                console.error('submitReviewDecision错误:', e);
+                return null;
+            }
+        },
+        [API_BASE]
+    );
+
     const watchProgress = useCallback(
         (docId: string, onProgress: (progress: any) => void): (() => void) => {
             const eventSource = new EventSource(`${API_BASE}/documents/${docId}/progress`);
@@ -484,6 +657,10 @@ export function useVectorSearch() {
         cancelOcr,
         getChatHistory,
         getComplianceHistory,
+        checkComplianceV2,
+        getComplianceV2History,
+        getEvidence,
+        submitReviewDecision,
         watchProgress,
     };
 }

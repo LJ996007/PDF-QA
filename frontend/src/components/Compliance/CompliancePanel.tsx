@@ -1,20 +1,16 @@
-import React, { useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useDocumentStore } from '../../stores/documentStore';
-import type { BoundingBox, TextChunk } from '../../stores/documentStore';
+import type { BoundingBox, EvidenceItem } from '../../stores/documentStore';
+import { useVectorSearch } from '../../hooks/useVectorSearch';
 import './CompliancePanel.css';
 
 interface CompliancePanelProps {
     className?: string;
 }
 
-type CompatTextChunk = TextChunk & {
-    page_number?: number;
-    ref_id?: string;
-};
+type ViewMode = 'summary' | 'evidence';
 
-const createFallbackBbox = (page: number): BoundingBox => ({
+const fallbackBbox = (page: number): BoundingBox => ({
     page,
     x: 0,
     y: 0,
@@ -22,242 +18,330 @@ const createFallbackBbox = (page: number): BoundingBox => ({
     h: 20,
 });
 
-const getRefPage = (ref: CompatTextChunk): number | undefined => {
-    return ref.page_number ?? ref.bbox?.page ?? ref.page;
-};
-
-const getRefId = (ref: CompatTextChunk): string => {
-    return ref.refId || ref.ref_id || '';
-};
-
-const toHighlightRef = (ref: CompatTextChunk, page: number): TextChunk => {
-    return {
-        ...ref,
-        refId: getRefId(ref),
-        page,
-        bbox: ref.bbox ?? createFallbackBbox(page),
-        source: ref.source ?? 'native',
-    };
-};
-
 export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) => {
     const {
         currentDocument,
         config,
         setHighlights,
         setCurrentPage,
-        // 新增：合规性状态和操作
-        complianceResults,
-        complianceMarkdown,
         complianceRequirements,
-        setComplianceResults,
-        setComplianceRequirements
+        complianceV2Result,
+        evidenceItems,
+        reviewState,
+        setComplianceRequirements,
+        setComplianceV2,
     } = useDocumentStore();
 
-    const currentDocumentId = currentDocument?.id;
-    const apiBaseUrl = config.apiBaseUrl || 'http://localhost:8000';
+    const {
+        checkComplianceV2,
+        getComplianceV2History,
+        getEvidence,
+        submitReviewDecision,
+    } = useVectorSearch();
 
-    // 移除本地 state，改用 store state
     const [loading, setLoading] = useState(false);
+    const [reviewing, setReviewing] = useState(false);
+    const [viewMode, setViewMode] = useState<ViewMode>('summary');
+    const currentDocumentId = currentDocument?.id;
+    const apiBaseUrl = (config.apiBaseUrl || 'http://localhost:8000').replace(/\/$/, '');
 
-    const handleCheck = async () => {
-        if (!currentDocumentId || !complianceRequirements.trim()) return;
+    useEffect(() => {
+        if (!currentDocumentId) return;
+        let disposed = false;
+
+        const bootstrap = async () => {
+            const [history, evidence] = await Promise.all([
+                getComplianceV2History(currentDocumentId),
+                getEvidence(currentDocumentId),
+            ]);
+
+            if (disposed) return;
+
+            if (history) {
+                setComplianceV2({
+                    complianceV2Result: history,
+                    evidenceItems: evidence.length > 0 ? evidence : history.evidence,
+                    reviewState: history.reviewState,
+                });
+                if (!complianceRequirements && history.requirements?.length) {
+                    setComplianceRequirements(history.requirements.join('\n'));
+                }
+            } else {
+                setComplianceV2({
+                    complianceV2Result: null,
+                    evidenceItems: [],
+                    reviewState: null,
+                });
+            }
+        };
+
+        void bootstrap();
+        return () => {
+            disposed = true;
+        };
+    }, [
+        currentDocumentId,
+        getComplianceV2History,
+        getEvidence,
+        setComplianceV2,
+        setComplianceRequirements,
+        complianceRequirements,
+    ]);
+
+    const handleAnalyze = useCallback(async () => {
+        if (!currentDocumentId) return;
+        const requirements = complianceRequirements
+            .split('\n')
+            .map((item) => item.trim())
+            .filter(Boolean);
+
+        if (requirements.length === 0) {
+            window.alert('请先输入审核要求，每行一条。');
+            return;
+        }
 
         setLoading(true);
         try {
-            const reqList = complianceRequirements.split('\n').filter(r => r.trim());
-
-            const response = await fetch(`${apiBaseUrl}/api/documents/${currentDocumentId}/compliance`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    requirements: reqList,
-                    api_key: config.deepseekApiKey || config.zhipuApiKey
-                }),
+            const result = await checkComplianceV2(currentDocumentId, {
+                requirements,
+                policy_set_id: 'contracts/base_rules',
+                api_key: config.deepseekApiKey || config.zhipuApiKey || undefined,
+                review_required: true,
             });
 
-            if (!response.ok) throw new Error('Check failed');
+            if (!result) {
+                throw new Error('合规分析失败');
+            }
 
-            const data = await response.json();
-            // 后端现在返回 { results: [...], markdown: "..." }
-
-            // 更新到 store
-            setComplianceResults(data.results || data, data.markdown || '');
+            setComplianceV2({
+                complianceV2Result: result,
+                evidenceItems: result.evidence || [],
+                reviewState: result.reviewState,
+            });
+            setViewMode('summary');
         } catch (error) {
             console.error(error);
-            alert('检查失败，请重试');
+            window.alert('合规分析失败，请查看后端日志。');
         } finally {
             setLoading(false);
         }
-    };
+    }, [
+        checkComplianceV2,
+        complianceRequirements,
+        config.deepseekApiKey,
+        config.zhipuApiKey,
+        currentDocumentId,
+        setComplianceV2,
+    ]);
 
+    const jumpToEvidence = useCallback(
+        (evidence: EvidenceItem) => {
+            const page = evidence.page || evidence.bbox?.page || 1;
+            const bbox = evidence.bbox || fallbackBbox(page);
+            setHighlights([
+                {
+                    id: `${evidence.refId}_${page}`,
+                    refId: evidence.refId,
+                    content: evidence.content || '',
+                    page,
+                    bbox,
+                    source: evidence.sourceType === 'derived' ? 'native' : evidence.sourceType,
+                },
+            ]);
+            setCurrentPage(page);
+        },
+        [setCurrentPage, setHighlights]
+    );
 
+    const submitReview = useCallback(
+        async (decision: 'approved' | 'rejected') => {
+            if (!currentDocumentId) return;
+            setReviewing(true);
+            try {
+                const next = await submitReviewDecision(
+                    currentDocumentId,
+                    decision,
+                    'manual-reviewer',
+                    decision === 'approved' ? '人工复核通过' : '人工复核拒绝'
+                );
+                if (!next) throw new Error('review failed');
 
-    // 处理页码点击 (从 Markdown 中的 [[P5]] 格式)
-    const handlePageClick = (pageNum: number) => {
-        console.log('[CompliancePanel] handlePageClick called with pageNum:', pageNum);
-        console.log('[CompliancePanel] results:', complianceResults);
-
-        // 在 results 中查找对应页码的引用
-        for (const item of complianceResults) {
-            if (item.references && item.references.length > 0) {
-                for (const rawRef of item.references) {
-                    const ref: CompatTextChunk = rawRef;
-                    console.log('[CompliancePanel] Checking ref:', ref);
-                    // 后端返回的是序列化后的 TextChunk，字段名可能是 page_number 或通过 bbox.page
-                    const refPage = getRefPage(ref);
-                    console.log('[CompliancePanel] refPage:', refPage, 'target:', pageNum);
-                    if (refPage === pageNum) {
-                        // 构建高亮对象
-                        const highlightRef = toHighlightRef(ref, refPage);
-                        console.log('[CompliancePanel] Setting highlight:', highlightRef);
-                        setHighlights([highlightRef]);
-                        setCurrentPage(pageNum);
-                        return;
-                    }
-                }
+                setComplianceV2({
+                    reviewState: next,
+                    complianceV2Result: complianceV2Result
+                        ? {
+                              ...complianceV2Result,
+                              reviewState: next,
+                          }
+                        : complianceV2Result,
+                    evidenceItems,
+                });
+            } catch (error) {
+                console.error(error);
+                window.alert('提交复核失败，请重试。');
+            } finally {
+                setReviewing(false);
             }
-        }
+        },
+        [
+            complianceV2Result,
+            currentDocumentId,
+            evidenceItems,
+            setComplianceV2,
+            submitReviewDecision,
+        ]
+    );
 
-        // 如果没找到具体引用，至少跳转到该页
-        console.log('[CompliancePanel] No matching ref found, just navigating to page:', pageNum);
-        setCurrentPage(pageNum);
-    };
+    const mergedEvidence = useMemo(() => {
+        if (evidenceItems.length > 0) return evidenceItems;
+        return complianceV2Result?.evidence || [];
+    }, [complianceV2Result?.evidence, evidenceItems]);
 
-    // 处理 [ref-N] 格式引用点击
-    const handleRefClick = (refIndex: number) => {
-        console.log('[CompliancePanel] handleRefClick called with refIndex:', refIndex);
-        const targetRefId = `ref-${refIndex}`;
-
-        // 在所有 results 中查找对应 refId 的引用
-        for (const item of complianceResults) {
-            if (item.references && item.references.length > 0) {
-                for (const rawRef of item.references) {
-                    const ref: CompatTextChunk = rawRef;
-                    // 兼容 ref_id (后端返回) 和 refId (前端定义)
-                    const currentRefId = getRefId(ref);
-
-                    if (currentRefId === targetRefId) {
-                        const refPage = getRefPage(ref);
-
-                        if (refPage) {
-                            console.log('[CompliancePanel] Found matching ref:', ref);
-                            // 构建高亮对象
-                            const highlightRef = toHighlightRef(ref, refPage);
-                            setHighlights([highlightRef]);
-                            setCurrentPage(refPage);
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-        console.log('[CompliancePanel] No ref found for index:', refIndex);
-    };
+    const displayReviewState = reviewState || complianceV2Result?.reviewState || null;
 
     return (
         <div className={`compliance-panel ${className || ''}`}>
             <div className="input-section">
                 <textarea
                     className="req-input"
-                    placeholder="请输入技术要求，每行一条..."
+                    placeholder="请输入合同合规审核要求，每行一条"
                     value={complianceRequirements}
-                    onChange={(e) => setComplianceRequirements(e.target.value)}
+                    onChange={(event) => setComplianceRequirements(event.target.value)}
                     disabled={loading}
                 />
+                <div className="toolbar-row">
+                    <button className="check-btn" onClick={handleAnalyze} disabled={loading || !currentDocumentId}>
+                        {loading ? '分析中...' : '开始合规分析 V2'}
+                    </button>
+                    <span className="api-base-label">API: {apiBaseUrl}</span>
+                </div>
+            </div>
+
+            <div className="view-tabs">
                 <button
-                    className="check-btn"
-                    onClick={handleCheck}
-                    disabled={loading || !currentDocumentId}
+                    className={`view-tab ${viewMode === 'summary' ? 'active' : ''}`}
+                    onClick={() => setViewMode('summary')}
                 >
-                    {loading ? '正在检查...' : '开始合规性检查'}
+                    结论视图
+                </button>
+                <button
+                    className={`view-tab ${viewMode === 'evidence' ? 'active' : ''}`}
+                    onClick={() => setViewMode('evidence')}
+                >
+                    证据视图
                 </button>
             </div>
 
-            <div className="results-section markdown-result">
-                {complianceMarkdown ? (
-                    <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                            // 自定义文本渲染，处理引用
-                            p: ({ children }) => {
-                                return <p>{processPageRefs(children, handlePageClick, handleRefClick)}</p>;
-                            },
-                            td: ({ children }) => {
-                                return <td>{processPageRefs(children, handlePageClick, handleRefClick)}</td>;
-                            }
-                        }}
-                    >
-                        {complianceMarkdown}
-                    </ReactMarkdown>
-                ) : (
-                    <div className="empty-state">
-                        <p>输入技术要求后点击"开始合规性检查"</p>
-                    </div>
-                )}
-            </div>
+            {!complianceV2Result ? (
+                <div className="empty-state">
+                    <p>尚无 V2 分析结果。输入要求后点击“开始合规分析 V2”。</p>
+                </div>
+            ) : (
+                <div className="results-section">
+                    {viewMode === 'summary' ? (
+                        <>
+                            <div className="summary-card">
+                                <div className="summary-item"><strong>结论:</strong> {complianceV2Result.decision}</div>
+                                <div className="summary-item"><strong>风险:</strong> {complianceV2Result.riskLevel}</div>
+                                <div className="summary-item">
+                                    <strong>置信度:</strong> {(complianceV2Result.confidence * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                            <div className="summary-text">{complianceV2Result.summary || '无摘要。'}</div>
+
+                            <h4>字段提取</h4>
+                            <table className="compliance-table">
+                                <thead>
+                                    <tr>
+                                        <th>字段</th>
+                                        <th>提取值</th>
+                                        <th>状态</th>
+                                        <th>置信度</th>
+                                        <th>证据</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {complianceV2Result.fieldResults.map((item, idx) => (
+                                        <tr key={`${item.fieldKey}_${idx}`}>
+                                            <td>{item.fieldName}</td>
+                                            <td>{item.value || '-'}</td>
+                                            <td>{item.status}</td>
+                                            <td>{(item.confidence * 100).toFixed(1)}%</td>
+                                            <td>{item.evidenceRefs.join(', ') || '-'}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+
+                            <h4>规则判定</h4>
+                            <table className="compliance-table">
+                                <thead>
+                                    <tr>
+                                        <th>规则</th>
+                                        <th>状态</th>
+                                        <th>说明</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {complianceV2Result.ruleResults.map((item, idx) => (
+                                        <tr key={`${item.ruleId}_${idx}`}>
+                                            <td>{item.ruleName}</td>
+                                            <td>{item.status}</td>
+                                            <td>{item.message}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+
+                            <div className="review-panel">
+                                <div className="review-status">
+                                    <strong>人工复核状态:</strong> {displayReviewState?.state || 'pending_review'}
+                                </div>
+                                <div className="review-actions">
+                                    <button
+                                        className="review-btn approve"
+                                        onClick={() => void submitReview('approved')}
+                                        disabled={reviewing || !currentDocumentId}
+                                    >
+                                        复核通过
+                                    </button>
+                                    <button
+                                        className="review-btn reject"
+                                        onClick={() => void submitReview('rejected')}
+                                        disabled={reviewing || !currentDocumentId}
+                                    >
+                                        复核拒绝
+                                    </button>
+                                </div>
+                            </div>
+                        </>
+                    ) : (
+                        <div className="evidence-list">
+                            {mergedEvidence.length === 0 ? (
+                                <div className="empty-state"><p>暂无证据数据。</p></div>
+                            ) : (
+                                mergedEvidence.map((item, idx) => (
+                                    <button
+                                        type="button"
+                                        key={`${item.refId}_${idx}`}
+                                        className="evidence-item"
+                                        onClick={() => jumpToEvidence(item)}
+                                    >
+                                        <div className="evidence-head">
+                                            <span className="evidence-ref">{item.refId}</span>
+                                            <span className="evidence-meta">
+                                                第 {item.page} 页 / {item.sourceType} / {item.supportLevel}
+                                            </span>
+                                        </div>
+                                        <div className="evidence-field">{item.fieldName}</div>
+                                        <div className="evidence-content">{item.content || '无文本片段'}</div>
+                                    </button>
+                                ))
+                            )}
+                        </div>
+                    )}
+                </div>
+            )}
         </div>
     );
 };
-
-// 处理文本中的引用标记，转换为可点击的标签
-// 支持两种格式: [[P数字]] 和 [ref-数字]
-function processPageRefs(
-    children: React.ReactNode,
-    onPageClick: (page: number) => void,
-    onRefClick?: (refIndex: number) => void
-): React.ReactNode {
-    if (typeof children === 'string') {
-        // 匹配 [[P数字]] 或 [ref-数字] 格式
-        const parts = children.split(/(\[\[P\d+\]\]|\[ref-\d+\])/g);
-        return parts.map((part, index) => {
-            // 匹配 [[P数字]] 格式
-            const pageMatch = part.match(/\[\[P(\d+)\]\]/);
-            if (pageMatch) {
-                const pageNum = parseInt(pageMatch[1], 10);
-                return (
-                    <span
-                        key={index}
-                        className="ref-tag"
-                        onClick={() => onPageClick(pageNum)}
-                        title={`跳转到第 ${pageNum} 页`}
-                    >
-                        P{pageNum}
-                    </span>
-                );
-            }
-
-            // 匹配 [ref-数字] 格式
-            const refMatch = part.match(/\[ref-(\d+)\]/);
-            if (refMatch) {
-                const refIndex = parseInt(refMatch[1], 10);
-                return (
-                    <span
-                        key={index}
-                        className="ref-tag ref-inline"
-                        onClick={() => onRefClick?.(refIndex)}
-                        title={`跳转到引用 ${refIndex}`}
-                    >
-                        {refIndex}
-                    </span>
-                );
-            }
-
-            return part;
-        });
-    }
-
-    // 如果是数组，递归处理每个元素
-    if (Array.isArray(children)) {
-        return children.map((child, index) => (
-            <React.Fragment key={index}>
-                {processPageRefs(child, onPageClick, onRefClick)}
-            </React.Fragment>
-        ));
-    }
-
-    return children;
-}
-

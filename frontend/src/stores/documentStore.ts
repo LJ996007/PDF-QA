@@ -30,6 +30,57 @@ export interface ComplianceItem {
     references: TextChunk[];
 }
 
+export interface EvidenceItem {
+    refId: string;
+    page: number;
+    bbox: BoundingBox;
+    sourceType: 'native' | 'ocr' | 'derived';
+    fieldName: string;
+    supportLevel: 'primary' | 'secondary';
+    content: string;
+}
+
+export interface ComplianceFieldResult {
+    fieldKey: string;
+    fieldName: string;
+    requirement: string;
+    value: string;
+    confidence: number;
+    status: 'matched' | 'missing' | 'uncertain';
+    evidenceRefs: string[];
+}
+
+export interface ComplianceRuleResult {
+    ruleId: string;
+    ruleName: string;
+    status: 'pass' | 'fail' | 'warn';
+    message: string;
+    fieldNames: string[];
+}
+
+export interface ReviewState {
+    state: 'pending_review' | 'approved' | 'rejected';
+    reviewer?: string;
+    note?: string;
+    updatedAt?: string;
+}
+
+export interface ComplianceV2Result {
+    decision: 'pass' | 'fail' | 'needs_review';
+    confidence: number;
+    riskLevel: 'low' | 'medium' | 'high';
+    summary: string;
+    fieldResults: ComplianceFieldResult[];
+    ruleResults: ComplianceRuleResult[];
+    evidence: EvidenceItem[];
+    reviewState: ReviewState;
+    requirements: string[];
+    allowedPages: number[];
+    policySetId: string;
+    markdown: string;
+    createdAt?: string;
+}
+
 export type PageOcrStatus = 'unrecognized' | 'processing' | 'recognized' | 'failed';
 export type ViewMode = 'list' | 'grid';
 export type RightPanelMode = 'chat' | 'compliance';
@@ -94,6 +145,9 @@ export interface TabState {
     complianceResults: ComplianceItem[];
     complianceMarkdown: string;
     complianceRequirements: string;
+    complianceV2Result: ComplianceV2Result | null;
+    evidenceItems: EvidenceItem[];
+    reviewState: ReviewState | null;
     rightPanelMode: RightPanelMode;
     progress: TabProgress | null;
 }
@@ -199,6 +253,115 @@ const normalizeProgress = (progress: unknown): TabProgress | null => {
     };
 };
 
+const normalizeEvidenceItems = (items: unknown): EvidenceItem[] => {
+    if (!Array.isArray(items)) return [];
+    return items
+        .map((item) => {
+            if (!item || typeof item !== 'object') return null;
+            const raw = item as Partial<EvidenceItem>;
+            const page = Number((raw as any).page || (raw as any).bbox?.page || 1);
+            const refId = String((raw as any).refId || (raw as any).ref_id || '');
+            if (!refId) return null;
+            const bboxRaw = (raw as any).bbox || {};
+            return {
+                refId,
+                page,
+                bbox: {
+                    page,
+                    x: Number(bboxRaw.x || 0),
+                    y: Number(bboxRaw.y || 0),
+                    w: Number(bboxRaw.w || 100),
+                    h: Number(bboxRaw.h || 20),
+                },
+                sourceType: ((raw as any).sourceType || (raw as any).source_type || 'native') as
+                    | 'native'
+                    | 'ocr'
+                    | 'derived',
+                fieldName: String((raw as any).fieldName || (raw as any).field_name || ''),
+                supportLevel: ((raw as any).supportLevel || (raw as any).support_level || 'primary') as
+                    | 'primary'
+                    | 'secondary',
+                content: String((raw as any).content || ''),
+            } as EvidenceItem;
+        })
+        .filter((item): item is EvidenceItem => Boolean(item));
+};
+
+const normalizeReviewState = (state: unknown): ReviewState | null => {
+    if (!state || typeof state !== 'object') return null;
+    const raw = state as Partial<ReviewState> & { updated_at?: string };
+    const value = String((raw as any).state || '');
+    if (!['pending_review', 'approved', 'rejected'].includes(value)) {
+        return null;
+    }
+    return {
+        state: value as ReviewState['state'],
+        reviewer: raw.reviewer ? String(raw.reviewer) : undefined,
+        note: raw.note ? String(raw.note) : undefined,
+        updatedAt: (raw as any).updatedAt
+            ? String((raw as any).updatedAt)
+            : (raw as any).updated_at
+            ? String((raw as any).updated_at)
+            : undefined,
+    };
+};
+
+const normalizeComplianceV2Result = (value: unknown): ComplianceV2Result | null => {
+    if (!value || typeof value !== 'object') return null;
+    const raw = value as any;
+    const decision = String(raw.decision || '');
+    if (!['pass', 'fail', 'needs_review'].includes(decision)) return null;
+
+    const fieldResults = Array.isArray(raw.fieldResults || raw.field_results)
+        ? (raw.fieldResults || raw.field_results).map((item: any) => ({
+              fieldKey: String(item?.fieldKey || item?.field_key || ''),
+              fieldName: String(item?.fieldName || item?.field_name || ''),
+              requirement: String(item?.requirement || ''),
+              value: String(item?.value || ''),
+              confidence: Number(item?.confidence || 0),
+              status: (item?.status || 'uncertain') as ComplianceFieldResult['status'],
+              evidenceRefs: Array.isArray(item?.evidenceRefs || item?.evidence_refs)
+                  ? (item.evidenceRefs || item.evidence_refs).map((x: any) => String(x))
+                  : [],
+          }))
+        : [];
+
+    const ruleResults = Array.isArray(raw.ruleResults || raw.rule_results)
+        ? (raw.ruleResults || raw.rule_results).map((item: any) => ({
+              ruleId: String(item?.ruleId || item?.rule_id || ''),
+              ruleName: String(item?.ruleName || item?.rule_name || ''),
+              status: (item?.status || 'warn') as ComplianceRuleResult['status'],
+              message: String(item?.message || ''),
+              fieldNames: Array.isArray(item?.fieldNames || item?.field_names)
+                  ? (item.fieldNames || item.field_names).map((x: any) => String(x))
+                  : [],
+          }))
+        : [];
+
+    const evidence = normalizeEvidenceItems(raw.evidence || []);
+    const reviewState = normalizeReviewState(raw.reviewState || raw.review_state) || {
+        state: 'pending_review',
+    };
+
+    return {
+        decision: decision as ComplianceV2Result['decision'],
+        confidence: Number(raw.confidence || 0),
+        riskLevel: (raw.riskLevel || raw.risk_level || 'high') as ComplianceV2Result['riskLevel'],
+        summary: String(raw.summary || ''),
+        fieldResults,
+        ruleResults,
+        evidence,
+        reviewState,
+        requirements: Array.isArray(raw.requirements) ? raw.requirements.map((x: any) => String(x)) : [],
+        allowedPages: Array.isArray(raw.allowedPages || raw.allowed_pages)
+            ? (raw.allowedPages || raw.allowed_pages).map((x: any) => Number(x))
+            : [],
+        policySetId: String(raw.policySetId || raw.policy_set_id || 'contracts/base_rules'),
+        markdown: String(raw.markdown || ''),
+        createdAt: raw.createdAt ? String(raw.createdAt) : raw.created_at ? String(raw.created_at) : undefined,
+    };
+};
+
 const createTabState = (doc: Document, pdfUrl: string | null): TabState => ({
     docId: doc.id,
     document: doc,
@@ -213,6 +376,9 @@ const createTabState = (doc: Document, pdfUrl: string | null): TabState => ({
     complianceResults: [],
     complianceMarkdown: '',
     complianceRequirements: '',
+    complianceV2Result: null,
+    evidenceItems: [],
+    reviewState: null,
     rightPanelMode: 'chat',
     progress: null,
 });
@@ -255,6 +421,9 @@ const normalizeTabState = (tab: unknown, docId: string): TabState | null => {
         complianceResults: Array.isArray(raw.complianceResults) ? raw.complianceResults : [],
         complianceMarkdown: String(raw.complianceMarkdown || ''),
         complianceRequirements: String(raw.complianceRequirements || ''),
+        complianceV2Result: normalizeComplianceV2Result((raw as any).complianceV2Result || (raw as any).compliance_v2),
+        evidenceItems: normalizeEvidenceItems((raw as any).evidenceItems || (raw as any).evidence_items),
+        reviewState: normalizeReviewState((raw as any).reviewState || (raw as any).review_state),
         rightPanelMode: raw.rightPanelMode === 'compliance' ? 'compliance' : 'chat',
         progress: normalizeProgress(raw.progress),
     };
@@ -283,6 +452,9 @@ interface DocumentState {
     complianceResults: ComplianceItem[];
     complianceMarkdown: string;
     complianceRequirements: string;
+    complianceV2Result: ComplianceV2Result | null;
+    evidenceItems: EvidenceItem[];
+    reviewState: ReviewState | null;
     rightPanelMode: RightPanelMode;
     activeProgress: TabProgress | null;
 
@@ -299,7 +471,22 @@ interface DocumentState {
     setTabProgress: (docId: string, progress: TabProgress | null) => void;
     setTabCompliance: (
         docId: string,
-        payload: { results?: ComplianceItem[]; markdown?: string; requirements?: string }
+        payload: {
+            results?: ComplianceItem[];
+            markdown?: string;
+            requirements?: string;
+            complianceV2Result?: ComplianceV2Result | null;
+            evidenceItems?: EvidenceItem[];
+            reviewState?: ReviewState | null;
+        }
+    ) => void;
+    setTabComplianceV2: (
+        docId: string,
+        payload: {
+            complianceV2Result?: ComplianceV2Result | null;
+            evidenceItems?: EvidenceItem[];
+            reviewState?: ReviewState | null;
+        }
     ) => void;
     setTabLoading: (docId: string, loading: boolean) => void;
     setTabRightPanelMode: (docId: string, mode: RightPanelMode) => void;
@@ -310,6 +497,11 @@ interface DocumentState {
 
     setComplianceResults: (results: ComplianceItem[], markdown: string) => void;
     setComplianceRequirements: (text: string) => void;
+    setComplianceV2: (payload: {
+        complianceV2Result?: ComplianceV2Result | null;
+        evidenceItems?: EvidenceItem[];
+        reviewState?: ReviewState | null;
+    }) => void;
 
     setScale: (scale: number) => void;
     setCurrentPage: (page: number) => void;
@@ -413,6 +605,9 @@ const syncActiveFromTabs = (state: DocumentState): void => {
     state.complianceResults = tab?.complianceResults ?? [];
     state.complianceMarkdown = tab?.complianceMarkdown ?? '';
     state.complianceRequirements = tab?.complianceRequirements ?? '';
+    state.complianceV2Result = tab?.complianceV2Result ?? null;
+    state.evidenceItems = tab?.evidenceItems ?? [];
+    state.reviewState = tab?.reviewState ?? null;
     state.rightPanelMode = tab?.rightPanelMode ?? 'chat';
     state.activeProgress = tab?.progress ?? null;
 };
@@ -450,6 +645,9 @@ export const useDocumentStore = create<DocumentState>()(
             complianceResults: [],
             complianceMarkdown: '',
             complianceRequirements: '',
+            complianceV2Result: null,
+            evidenceItems: [],
+            reviewState: null,
             rightPanelMode: 'chat',
             activeProgress: null,
 
@@ -560,6 +758,32 @@ export const useDocumentStore = create<DocumentState>()(
                 if (typeof payload.requirements === 'string') {
                     tab.complianceRequirements = payload.requirements;
                 }
+                if (payload.complianceV2Result !== undefined) {
+                    tab.complianceV2Result = payload.complianceV2Result || null;
+                }
+                if (Array.isArray(payload.evidenceItems)) {
+                    tab.evidenceItems = payload.evidenceItems;
+                }
+                if (payload.reviewState !== undefined) {
+                    tab.reviewState = payload.reviewState || null;
+                }
+                if (state.activeDocId === docId) {
+                    syncActiveFromTabs(state);
+                }
+            }),
+
+            setTabComplianceV2: (docId, payload) => set((state) => {
+                const tab = state.tabsByDocId[docId];
+                if (!tab) return;
+                if (payload.complianceV2Result !== undefined) {
+                    tab.complianceV2Result = payload.complianceV2Result || null;
+                }
+                if (Array.isArray(payload.evidenceItems)) {
+                    tab.evidenceItems = payload.evidenceItems;
+                }
+                if (payload.reviewState !== undefined) {
+                    tab.reviewState = payload.reviewState || null;
+                }
                 if (state.activeDocId === docId) {
                     syncActiveFromTabs(state);
                 }
@@ -623,6 +847,20 @@ export const useDocumentStore = create<DocumentState>()(
             setComplianceRequirements: (text) => set((state) => {
                 updateActiveTab(state, (tab) => {
                     tab.complianceRequirements = text;
+                });
+            }),
+
+            setComplianceV2: (payload) => set((state) => {
+                updateActiveTab(state, (tab) => {
+                    if (payload.complianceV2Result !== undefined) {
+                        tab.complianceV2Result = payload.complianceV2Result || null;
+                    }
+                    if (Array.isArray(payload.evidenceItems)) {
+                        tab.evidenceItems = payload.evidenceItems;
+                    }
+                    if (payload.reviewState !== undefined) {
+                        tab.reviewState = payload.reviewState || null;
+                    }
                 });
             }),
 
@@ -733,7 +971,7 @@ export const useDocumentStore = create<DocumentState>()(
         })),
         {
             name: 'pdf-qa-storage',
-            version: 2,
+            version: 3,
             migrate: (persistedState: unknown) => {
                 if (!persistedState || typeof persistedState !== 'object') {
                     return persistedState as DocumentState;
@@ -762,6 +1000,9 @@ export const useDocumentStore = create<DocumentState>()(
                     tabsByDocId[state.currentDocument.id].complianceResults = Array.isArray(state.complianceResults) ? state.complianceResults : [];
                     tabsByDocId[state.currentDocument.id].complianceMarkdown = String(state.complianceMarkdown || '');
                     tabsByDocId[state.currentDocument.id].complianceRequirements = String(state.complianceRequirements || '');
+                    tabsByDocId[state.currentDocument.id].complianceV2Result = normalizeComplianceV2Result((state as any).complianceV2Result || (state as any).compliance_v2);
+                    tabsByDocId[state.currentDocument.id].evidenceItems = normalizeEvidenceItems((state as any).evidenceItems || (state as any).evidence_items);
+                    tabsByDocId[state.currentDocument.id].reviewState = normalizeReviewState((state as any).reviewState || (state as any).review_state);
                     tabsByDocId[state.currentDocument.id].rightPanelMode = state.rightPanelMode === 'compliance' ? 'compliance' : 'chat';
                     tabsByDocId[state.currentDocument.id].selectedPages = normalizeSelectedPages(state.selectedPages);
                     tabsByDocId[state.currentDocument.id].isLoading = Boolean(state.isLoading);

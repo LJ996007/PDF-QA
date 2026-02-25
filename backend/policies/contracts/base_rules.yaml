@@ -1,0 +1,31 @@
+policy_id: contracts/base_rules
+version: 1
+description: Contract scan compliance baseline rules.
+rules:
+  - id: required_fields
+    name: 关键字段存在性
+    type: required_fields
+    fields:
+      - party
+      - amount
+      - date
+      - term
+  - id: amount_format
+    name: 金额格式有效性
+    type: amount_format
+    fields:
+      - amount
+  - id: date_format
+    name: 日期格式有效性
+    type: date_format
+    fields:
+      - date
+  - id: term_consistency
+    name: 期限字段完整性
+    type: term_consistency
+    fields:
+      - term
+  - id: evidence_completeness
+    name: 证据完整性
+    type: evidence_completeness
+    fields: []

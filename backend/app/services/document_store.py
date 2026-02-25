@@ -10,6 +10,12 @@ Storage layout (relative to backend working dir):
       {doc_id}.json
     compliance/
       {doc_id}.json
+    compliance_v2/
+      {doc_id}.json
+    evidence/
+      {doc_id}.json
+    review/
+      {doc_id}.json
 """
 
 from __future__ import annotations
@@ -36,6 +42,9 @@ class DocumentStore:
         self.ocr_dir = self.base_dir / "ocr"
         self.chat_dir = self.base_dir / "chat"
         self.compliance_dir = self.base_dir / "compliance"
+        self.compliance_v2_dir = self.base_dir / "compliance_v2"
+        self.evidence_dir = self.base_dir / "evidence"
+        self.review_dir = self.base_dir / "review"
         self._lock = threading.RLock()
 
     def _ensure_dirs(self) -> None:
@@ -43,6 +52,9 @@ class DocumentStore:
         self.ocr_dir.mkdir(parents=True, exist_ok=True)
         self.chat_dir.mkdir(parents=True, exist_ok=True)
         self.compliance_dir.mkdir(parents=True, exist_ok=True)
+        self.compliance_v2_dir.mkdir(parents=True, exist_ok=True)
+        self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        self.review_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_index_unlocked(self) -> Dict[str, Any]:
         self._ensure_dirs()
@@ -168,6 +180,26 @@ class DocumentStore:
                     ocr_path.unlink()
             except Exception:
                 pass
+
+            # Best-effort delete v2 compliance payloads.
+            try:
+                v2_path = self.compliance_v2_dir / f"{doc_id}.json"
+                if v2_path.exists():
+                    v2_path.unlink()
+            except Exception:
+                pass
+            try:
+                evidence_path = self.evidence_dir / f"{doc_id}.json"
+                if evidence_path.exists():
+                    evidence_path.unlink()
+            except Exception:
+                pass
+            try:
+                review_path = self.review_dir / f"{doc_id}.json"
+                if review_path.exists():
+                    review_path.unlink()
+            except Exception:
+                pass
             return changed
 
     def _load_chat_unlocked(self, doc_id: str) -> Dict[str, Any]:
@@ -240,6 +272,87 @@ class DocumentStore:
             self._ensure_dirs()
             try:
                 path = self.compliance_dir / f"{doc_id}.json"
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+
+    def save_compliance_v2(self, doc_id: str, payload: Dict[str, Any]) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            path = self.compliance_v2_dir / f"{doc_id}.json"
+            _atomic_write_json(path, payload)
+
+    def load_compliance_v2(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        self._ensure_dirs()
+        path = self.compliance_v2_dir / f"{doc_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def delete_compliance_v2(self, doc_id: str) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            try:
+                path = self.compliance_v2_dir / f"{doc_id}.json"
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+
+    def save_evidence(self, doc_id: str, payload: Dict[str, Any]) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            path = self.evidence_dir / f"{doc_id}.json"
+            _atomic_write_json(path, payload)
+
+    def load_evidence(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        self._ensure_dirs()
+        path = self.evidence_dir / f"{doc_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def delete_evidence(self, doc_id: str) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            try:
+                path = self.evidence_dir / f"{doc_id}.json"
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+
+    def save_review(self, doc_id: str, payload: Dict[str, Any]) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            path = self.review_dir / f"{doc_id}.json"
+            _atomic_write_json(path, payload)
+
+    def load_review(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        self._ensure_dirs()
+        path = self.review_dir / f"{doc_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def delete_review(self, doc_id: str) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            try:
+                path = self.review_dir / f"{doc_id}.json"
                 if path.exists():
                     path.unlink()
             except Exception:

@@ -28,6 +28,9 @@ async def lifespan(app: FastAPI):
     os.makedirs(os.path.join("doc_store", "ocr"), exist_ok=True)
     os.makedirs(os.path.join("doc_store", "chat"), exist_ok=True)
     os.makedirs(os.path.join("doc_store", "compliance"), exist_ok=True)
+    os.makedirs(os.path.join("doc_store", "compliance_v2"), exist_ok=True)
+    os.makedirs(os.path.join("doc_store", "evidence"), exist_ok=True)
+    os.makedirs(os.path.join("doc_store", "review"), exist_ok=True)
 
     try:
         documents.load_persisted_documents()

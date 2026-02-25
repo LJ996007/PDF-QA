@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from app.models.schemas import DocumentUploadResponse, OCRChunk, ProgressEvent
+from app.models.schemas import ComplianceV2Request, DocumentUploadResponse, OCRChunk, ProgressEvent
 from app.services.baidu_ocr import baidu_ocr_gateway
 from app.services.document_store import document_store
 from app.services.local_ocr import local_ocr_gateway
@@ -1295,6 +1295,9 @@ async def delete_document(doc_id: str):
     document_store.delete_doc(doc_id)
     document_store.delete_chat(doc_id)
     document_store.delete_compliance(doc_id)
+    document_store.delete_compliance_v2(doc_id)
+    document_store.delete_evidence(doc_id)
+    document_store.delete_review(doc_id)
 
     documents.pop(doc_id, None)
     document_progress.pop(doc_id, None)
@@ -1426,3 +1429,100 @@ async def get_compliance_history(doc_id: str):
         raise HTTPException(status_code=404, detail="暂无合规检查历史")
     return data
 
+
+class ReviewSubmitRequest(BaseModel):
+    decision: str
+    reviewer: Optional[str] = None
+    note: Optional[str] = None
+
+
+@router.post("/{doc_id}/compliance/v2")
+async def check_compliance_v2(doc_id: str, request: ComplianceV2Request):
+    from app.services.compliance_service import compliance_service
+
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc = documents.get(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if request.allowed_pages:
+        allowed_pages = _sorted_unique_pages(request.allowed_pages)
+    else:
+        allowed_pages = get_consistent_recognized_pages(doc)
+
+    try:
+        result = await compliance_service.verify_requirements_v2(
+            doc_id=doc_id,
+            requirements=list(request.requirements or []),
+            policy_set_id=request.policy_set_id,
+            allowed_pages=allowed_pages,
+            api_key=request.api_key,
+            review_required=request.review_required,
+            doc=doc,
+        )
+        payload = {
+            "version": 1,
+            "doc_id": doc_id,
+            "created_at": _now_iso_utc(),
+            **(result or {}),
+        }
+        document_store.save_compliance_v2(doc_id, jsonable_encoder(payload))
+        document_store.save_evidence(
+            doc_id,
+            {
+                "version": 1,
+                "doc_id": doc_id,
+                "created_at": payload.get("created_at"),
+                "evidence": payload.get("evidence") or [],
+            },
+        )
+        document_store.save_review(doc_id, payload.get("review_state") or {})
+        return payload
+    except Exception as exc:
+        logger.exception("Compliance v2 check failed for %s", doc_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/{doc_id}/compliance_v2_history")
+async def get_compliance_v2_history(doc_id: str):
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    data = document_store.load_compliance_v2(doc_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="No compliance v2 history")
+    return data
+
+
+@router.get("/{doc_id}/evidence")
+async def get_evidence(doc_id: str):
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    data = document_store.load_evidence(doc_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="No evidence history")
+    return data
+
+
+@router.post("/{doc_id}/review/submit")
+async def submit_review(doc_id: str, request: ReviewSubmitRequest):
+    from app.services.compliance_service import compliance_service
+
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    review_state = compliance_service.submit_review(
+        decision=request.decision,
+        reviewer=request.reviewer,
+        note=request.note,
+    )
+    review_payload = jsonable_encoder(review_state.model_dump())
+    document_store.save_review(doc_id, review_payload)
+
+    compliance_v2 = document_store.load_compliance_v2(doc_id) or {}
+    if isinstance(compliance_v2, dict) and compliance_v2:
+        compliance_v2["review_state"] = review_payload
+        document_store.save_compliance_v2(doc_id, compliance_v2)
+
+    return {"status": "ok", "review_state": review_payload}

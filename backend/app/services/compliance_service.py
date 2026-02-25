@@ -1,261 +1,341 @@
-"""
-技术合规性检查服务
-"""
-from typing import List, Dict, Any
+"""Compliance services (legacy + v2 contract workflow)."""
+
+from __future__ import annotations
+
 import asyncio
-from app.services.rag_engine import rag_engine
+import json
+import re
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+from app.models.schemas import (
+    ComplianceFieldResult,
+    ComplianceRuleResult,
+    ComplianceV2Response,
+    EvidenceItem,
+    ReviewState,
+    TextChunk,
+)
+from app.services.evidence_service import evidence_service
+from app.services.field_extractor import field_extractor
+from app.services.layout_service import layout_service
 from app.services.llm_router import llm_router
-from app.models.schemas import TextChunk
+from app.services.rag_engine import rag_engine
+from app.services.review_service import review_service
+from app.services.rule_engine import rule_engine
+
+
+def _now_iso_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
 
 class ComplianceService:
+    """Compatibility wrapper for v1 and orchestrator for v2."""
+
     async def verify_requirements(
         self,
         doc_id: str,
         requirements: List[str],
-        api_key: str = None,
-        allowed_pages: List[int] | None = None,
+        api_key: Optional[str] = None,
+        allowed_pages: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
-        """
-        验证多条技术要求
-        返回: { results: [...], markdown: "表格字符串" }
-        """
-        results = []
-        
-        # 并发处理每一条要求
-        tasks = [self._verify_single_requirement(doc_id, req, api_key, allowed_pages) for req in requirements]
-        results = await asyncio.gather(*tasks)
-        
-        # 添加ID
-        for idx, item in enumerate(results):
-            item['id'] = idx + 1
-        
-        # 生成 Markdown 表格
-        markdown = self._format_as_markdown(results)
-        
-        return {
-            "results": results,
-            "markdown": markdown
-        }
-    
-    def _format_as_markdown(self, results: List[Dict[str, Any]]) -> str:
-        """将结果格式化为 Markdown 表格"""
-        import re
-        
-        status_map = {
-            "satisfied": "✅ 符合",
-            "unsatisfied": "❌ 不符合", 
-            "partial": "⚠️ 部分符合",
-            "unknown": "❓ 未知",
-            "error": "🔴 错误"
-        }
-        
-        lines = [
-            "| 序号 | 技术要求 | 应答情况 | 状态 |",
-            "|:---:|:---|:---|:---:|"
+        """Legacy compliance check: retrieval + LLM verdict + markdown table."""
+
+        tasks = [
+            self._verify_single_requirement(doc_id, req, api_key=api_key, allowed_pages=allowed_pages)
+            for req in (requirements or [])
+            if str(req).strip()
         ]
-        
-        global_ref_cursor = 0
-        
+        if not tasks:
+            return {"results": [], "markdown": ""}
+
+        results = await asyncio.gather(*tasks)
+        for idx, item in enumerate(results):
+            item["id"] = idx + 1
+
+        return {"results": results, "markdown": self._format_as_markdown(results)}
+
+    def _format_as_markdown(self, results: List[Dict[str, Any]]) -> str:
+        status_map = {
+            "satisfied": "PASS",
+            "unsatisfied": "FAIL",
+            "partial": "PARTIAL",
+            "unknown": "UNKNOWN",
+            "error": "ERROR",
+        }
+        lines = [
+            "| # | Requirement | Assessment | Status |",
+            "|---:|---|---|---|",
+        ]
+
         for item in results:
-            req = item.get('requirement', '')
-            response = item.get('response', '')
-            status = status_map.get(item.get('status', 'unknown'), '❓ 未知')
-            
-            # 引用列表
-            refs = item.get('references', [])
-            
-            # 构建 block_id/ref_id 到 全局引用序号 的映射
-            # 全局序号从 1 开始累加
-            current_ref_map = {}
-            
-            for idx, r in enumerate(refs):
-                global_id = global_ref_cursor + idx + 1
-                
-                # 更新 ref_id 为全局唯一ID，以便前端 handleRefClick 能找到它
-                # 注意：这会修改原始 TextChunk 对象
-                r.ref_id = f"ref-{global_id}"
-                
-                # 优先使用 block_id
-                if getattr(r, 'block_id', None):
-                    current_ref_map[f"[{r.block_id}]"] = global_id
-                    # 同时也映射裸ID
-                    current_ref_map[r.block_id] = global_id
-                
-                # 兼容 ref-N (后端生成的临时ID是 ref-1, ref-2...)
-                # 即使有 block_id，模型也可能偶尔用 ref-N，所以总是建立映射
-                local_ref_tag = f"ref-{idx + 1}"
-                current_ref_map[f"[{local_ref_tag}]"] = global_id
-                current_ref_map[local_ref_tag] = global_id
-            
-            # 更新全局游标
-            global_ref_cursor += len(refs)
+            requirement = str(item.get("requirement") or "").replace("|", "\\|")
+            response = str(item.get("response") or "").replace("|", "\\|")
+            status = status_map.get(str(item.get("status") or "unknown"), "UNKNOWN")
+            lines.append(f"| {item.get('id', '-')} | {requirement} | {response} | {status} |")
 
-            # 替换 Response 中的引用标记
-            # 1. 替换 [bXXXX] -> [ref-GlobalID]
-            def replace_tag(match):
-                tag_content = match.group(1) # b0001 or ref-1
-                full_tag = f"[{tag_content}]"
-                
-                if full_tag in current_ref_map:
-                    return f"[ref-{current_ref_map[full_tag]}]"
-                
-                # 尝试直接匹配 block_id
-                if tag_content in current_ref_map:
-                    return f"[ref-{current_ref_map[tag_content]}]"
-                    
-                # 如果没找到映射（可能是 ref-N 对应关系复杂），尝试回退
-                # 此时 active_refs 和 tags 是顺序对应的
-                # 但正则匹配是按文本顺序，active_refs 是按 tag 排序...
-                # 简单起见，如果 response 中直接写了 [b0001]，我们希望能替换
-                
-                return match.group(0) # 保持原样
-
-            # 这里的 active_refs 是依据 sorted unique tags 生成的
-            # 如 response 有 [b0005] [b0001]
-            # unique sorted: [b0001], [b0005]
-            # active_refs: [chunk(b0001), chunk(b0005)]
-            # global_ids: start+1 -> b0001, start+2 -> b0005
-            
-            # 我们重新构建一个精确映射：
-            # 提取 response 中所有的 unique tags
-            ref_tags = re.findall(r'\[(b\d+|ref-\d+)\]', response)
-            unique_tags = sorted(list(set(ref_tags)))
-            
-            # 理论上 len(unique_tags) == len(refs)
-            tag_to_global_id = {}
-            for i, tag in enumerate(unique_tags):
-                if i < len(refs):
-                     # 计算 global ID
-                     # 该 item 的 refs 起始 global id 是 global_ref_cursor - len(refs) + 1
-                     # refs[i] 对应 unique_tags[i]
-                     # 所以 unique_tags[i] 对应的 global_id 是 (global_ref_cursor - len(refs) + 1) + i
-                     gid = (global_ref_cursor - len(refs)) + 1 + i
-                     tag_to_global_id[tag] = gid
-            
-            def replace_precise(match):
-                tag = match.group(1)
-                if tag in tag_to_global_id:
-                    return f"[ref-{tag_to_global_id[tag]}]"
-                return match.group(0)
-            
-            response = re.sub(r'\[(b\d+|ref-\d+)\]', replace_precise, response)
-            
-            # 转义表格中的管道符
-            req = req.replace('|', '\\|')
-            response = response.replace('|', '\\|')
-            
-            lines.append(f"| {item['id']} | {req} | {response} | {status} |")
-        
         return "\n".join(lines)
 
     async def _verify_single_requirement(
         self,
         doc_id: str,
         requirement: str,
-        api_key: str = None,
-        allowed_pages: List[int] | None = None,
+        api_key: Optional[str] = None,
+        allowed_pages: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
-        """验证单条要求"""
         try:
-            # 1. 检索相关文段
             chunks = await rag_engine.retrieve(
-                requirement,
-                doc_id,
+                query=requirement,
+                doc_id=doc_id,
                 top_k=10,
                 api_key=api_key,
                 allowed_pages=allowed_pages,
             )
-            
+
             if not chunks:
                 return {
                     "requirement": requirement,
                     "status": "unknown",
-                    "response": "在文档中未找到相关内容。",
-                    "references": []
+                    "response": "No supporting content found in the selected pages.",
+                    "references": [],
                 }
-            
-            # 2. 构建验证Prompt
-            # 使用 block_id (bXXXX) 如果存在，否则使用 ref-N
-            def get_cid(c, i):
-                return c.block_id if c.block_id else f"ref-{i+1}"
-                
-            context = "\n\n".join([f"[{get_cid(c, i)}] (第{c.page_number}页) {c.content}" for i, c in enumerate(chunks)])
-            
-            prompt = f"""你是一个技术文件核对专家。请根据以下文档片段，判断是否能够支撑技术要求。
 
-判断标准：
-1. 直接满足：文档中存在与技术要求完全一致的表述。
-2. 分析满足：虽然没有完全一致的表述，但通过分析文档内容（如数据范围包含、单位换算、逻辑推断等），可以明确确认满足技术要求。
+            context = "\n\n".join([f"[ref-{i + 1}] {chunk.content}" for i, chunk in enumerate(chunks)])
+            prompt = (
+                "You are a compliance auditor.\n"
+                f"Requirement: {requirement}\n"
+                "Context:\n"
+                f"{context}\n\n"
+                "Return JSON with keys: status (satisfied|unsatisfied|partial|unknown), reason.\n"
+                "Use [ref-N] citations in reason."
+            )
 
-技术要求：{requirement}
+            resp = await llm_router.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                api_key=api_key,
+                json_mode=True,
+            )
+            content = resp.choices[0].message.content if resp and resp.choices else ""
+            content = content.replace("```json", "").replace("```", "").strip()
+            data = json.loads(content) if content else {}
 
-文档片段：
----
-{context}
----
+            status = str(data.get("status") or "unknown").strip().lower()
+            if status not in {"satisfied", "unsatisfied", "partial", "unknown"}:
+                status = "unknown"
+            reason = str(data.get("reason") or "Unable to determine from retrieved evidence.").strip()
 
-请JSON格式返回结果：
-{{
-    "status": "satisfied" | "unsatisfied" | "partial" | "unknown",
-    "reason": "简要说明理由。如果是通过分析确认满足，请在理由中说明推导逻辑。务必引用支持的段落编号（如[b0001]或[ref-1]），如果涉及多个片段，请全部列出。"
-}}
-注意：状态必须是 strictly satisfied/unsatisfied/partial/unknown 之一。
-"""
-            
-            messages = [{"role": "user", "content": prompt}]
-            
-            # 3. 调用LLM
-            response = await llm_router.chat_completion(messages, api_key=api_key, json_mode=True)
-            
-            import json
-            import re
-            
-            content = response.choices[0].message.content
-            # 清理 Markdown 代码块
-            if "```json" in content:
-                content = content.replace("```json", "").replace("```", "")
-            
-            result_data = json.loads(content)
-            
-            status = result_data.get("status", "unknown")
-            reason = result_data.get("reason", "无法判断")
-            
-            # 提取引用
-            active_refs = []
-            
-            # 提取reason中的引用标记: [b0001], [ref-1]
-            # 匹配 [bXXXX] 或 [ref-N]
-            ref_tags = re.findall(r'\[(b\d+|ref-\d+)\]', reason)
-            unique_tags = sorted(list(set(ref_tags)))
-            
-            # 建立映射: block_id -> chunk, ref-id -> chunk
-            chunk_map = {}
-            for i, c in enumerate(chunks):
-                if c.block_id:
-                    chunk_map[c.block_id] = c
-                chunk_map[f"ref-{i+1}"] = c
-            
-            for tag in unique_tags:
-                if tag in chunk_map:
-                    active_refs.append(chunk_map[tag])
-            
-            # 如果LLM没引用但确实satisfied，也许应该把top1 ref加上？
-            # 暂时只信任LLM的引用
-            
+            refs = re.findall(r"\[ref-(\d+)\]", reason)
+            active_refs: List[TextChunk] = []
+            for ref in sorted(set(refs)):
+                idx = int(ref) - 1
+                if 0 <= idx < len(chunks):
+                    active_refs.append(chunks[idx])
+
             return {
                 "requirement": requirement,
                 "status": status,
                 "response": reason,
-                "references": active_refs
+                "references": active_refs,
             }
-            
-        except Exception as e:
-            print(f"Error checking requirement '{requirement}': {e}")
+        except Exception as exc:
             return {
                 "requirement": requirement,
                 "status": "error",
-                "response": f"检查出错: {str(e)}",
-                "references": []
+                "response": f"Check failed: {exc}",
+                "references": [],
             }
+
+    async def verify_requirements_v2(
+        self,
+        doc_id: str,
+        requirements: List[str],
+        policy_set_id: str = "contracts/base_rules",
+        allowed_pages: Optional[List[int]] = None,
+        api_key: Optional[str] = None,
+        review_required: bool = True,
+        doc: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Contract compliance v2:
+        field extraction + rule evaluation + evidence + review state.
+        """
+
+        requirements = [str(item).strip() for item in (requirements or []) if str(item).strip()]
+        if not requirements:
+            review_state = review_service.create_initial_state(review_required)
+            payload = ComplianceV2Response(
+                decision="needs_review",
+                confidence=0.0,
+                risk_level="high",
+                summary="No requirements provided.",
+                field_results=[],
+                rule_results=[],
+                evidence=[],
+                review_state=review_state,
+                requirements=[],
+                allowed_pages=list(allowed_pages or []),
+                policy_set_id=policy_set_id,
+                markdown="",
+                created_at=_now_iso_utc(),
+            )
+            return payload.model_dump()
+
+        layout = layout_service.summarize_document(doc or {}, allowed_pages=allowed_pages)
+        field_records = await field_extractor.extract_contract_fields(
+            doc_id=doc_id,
+            requirements=requirements,
+            allowed_pages=allowed_pages,
+            api_key=api_key,
+        )
+        evidence_items, field_records = evidence_service.build_from_field_records(field_records)
+        rule_results = rule_engine.evaluate(field_records, policy_set_id=policy_set_id)
+
+        decision, risk_level, confidence = self._synthesize_decision(field_records, rule_results)
+        summary = await self._build_summary_with_llm(
+            requirements=requirements,
+            field_records=field_records,
+            rule_results=rule_results,
+            layout=layout,
+            api_key=api_key,
+        )
+        review_state = review_service.create_initial_state(review_required)
+        markdown = self._format_v2_markdown(field_records, rule_results, decision, risk_level, confidence)
+
+        public_fields = [
+            ComplianceFieldResult(
+                field_key=str(item.get("field_key") or ""),
+                field_name=str(item.get("field_name") or ""),
+                requirement=str(item.get("requirement") or ""),
+                value=str(item.get("value") or ""),
+                confidence=float(item.get("confidence") or 0.0),
+                status=str(item.get("status") or "uncertain"),
+                evidence_refs=list(item.get("evidence_refs") or []),
+            )
+            for item in field_records
+        ]
+
+        response = ComplianceV2Response(
+            decision=decision,
+            confidence=round(confidence, 3),
+            risk_level=risk_level,
+            summary=summary,
+            field_results=public_fields,
+            rule_results=rule_results,
+            evidence=evidence_items,
+            review_state=review_state,
+            requirements=requirements,
+            allowed_pages=list(allowed_pages or []),
+            policy_set_id=policy_set_id,
+            markdown=markdown,
+            created_at=_now_iso_utc(),
+        )
+        return response.model_dump()
+
+    def _synthesize_decision(
+        self,
+        field_records: List[Dict[str, Any]],
+        rule_results: List[ComplianceRuleResult],
+    ) -> tuple[str, str, float]:
+        fail_count = sum(1 for item in rule_results if item.status == "fail")
+        warn_count = sum(1 for item in rule_results if item.status == "warn")
+        matched = sum(1 for item in field_records if item.get("status") == "matched")
+        total = max(len(field_records), 1)
+        coverage = matched / total
+        avg_confidence = sum(float(item.get("confidence") or 0.0) for item in field_records) / total
+
+        if fail_count > 0:
+            return "fail", "high", max(0.25, min(avg_confidence * 0.8, 0.9))
+        if warn_count > 0 or coverage < 0.8:
+            return "needs_review", "medium", max(0.35, min(avg_confidence, 0.92))
+        return "pass", "low", max(0.5, min(avg_confidence + 0.05, 0.98))
+
+    async def _build_summary_with_llm(
+        self,
+        requirements: List[str],
+        field_records: List[Dict[str, Any]],
+        rule_results: List[ComplianceRuleResult],
+        layout: Dict[str, Any],
+        api_key: Optional[str],
+    ) -> str:
+        fields_text = "\n".join(
+            [
+                f"- {item.get('field_name')}: value={item.get('value')}, status={item.get('status')}, confidence={item.get('confidence')}"
+                for item in field_records
+            ]
+        )
+        rules_text = "\n".join(
+            [f"- {rule.rule_name}: {rule.status} ({rule.message})" for rule in rule_results]
+        )
+        prompt = (
+            "Summarize the contract compliance result in 3 bullet points.\n"
+            "Mention key risks and missing evidence if present.\n"
+            f"Requirements:\n{chr(10).join(requirements)}\n\n"
+            f"Field extraction:\n{fields_text}\n\n"
+            f"Rule results:\n{rules_text}\n\n"
+            f"Layout summary: {layout}\n"
+        )
+        try:
+            resp = await llm_router.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                api_key=api_key,
+                json_mode=False,
+            )
+            content = resp.choices[0].message.content if resp and resp.choices else ""
+            content = str(content or "").strip()
+            if content:
+                return content
+        except Exception:
+            pass
+
+        failed = [rule.rule_name for rule in rule_results if rule.status == "fail"]
+        warned = [rule.rule_name for rule in rule_results if rule.status == "warn"]
+        return (
+            f"Contract analyzed with {len(field_records)} extracted fields; "
+            f"failed rules: {failed or 'none'}, warning rules: {warned or 'none'}."
+        )
+
+    def _format_v2_markdown(
+        self,
+        field_records: List[Dict[str, Any]],
+        rule_results: List[ComplianceRuleResult],
+        decision: str,
+        risk_level: str,
+        confidence: float,
+    ) -> str:
+        lines = [
+            f"### Decision: {decision}",
+            f"- Risk Level: {risk_level}",
+            f"- Confidence: {confidence:.2f}",
+            "",
+            "### Field Results",
+            "| Field | Value | Status | Confidence | Evidence |",
+            "|---|---|---|---:|---|",
+        ]
+        for item in field_records:
+            field_name = str(item.get("field_name") or "").replace("|", "\\|")
+            value = str(item.get("value") or "").replace("|", "\\|")
+            status = str(item.get("status") or "uncertain")
+            conf = float(item.get("confidence") or 0.0)
+            refs = ", ".join(item.get("evidence_refs") or [])
+            lines.append(f"| {field_name} | {value} | {status} | {conf:.2f} | {refs} |")
+
+        lines.extend(["", "### Rule Results", "| Rule | Status | Message |", "|---|---|---|"])
+        for rule in rule_results:
+            rule_name = rule.rule_name.replace("|", "\\|")
+            rule_message = rule.message.replace("|", "\\|")
+            lines.append(
+                f"| {rule_name} | {rule.status} | {rule_message} |"
+            )
+
+        return "\n".join(lines)
+
+    def submit_review(
+        self,
+        decision: str,
+        reviewer: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> ReviewState:
+        return review_service.submit(decision=decision, reviewer=reviewer, note=note)
+
 
 compliance_service = ComplianceService()
