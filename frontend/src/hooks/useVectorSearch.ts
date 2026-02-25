@@ -94,7 +94,7 @@ export function useVectorSearch() {
                     },
                     body: JSON.stringify({
                         document_id: currentDocument.id,
-                        question: question,
+                        question,
                         history: historyPayload,
                         zhipu_api_key: config.zhipuApiKey,
                         deepseek_api_key: config.deepseekApiKey,
@@ -309,6 +309,42 @@ export function useVectorSearch() {
         [API_BASE]
     );
 
+    const recognizePages = useCallback(
+        async (docId: string, pages: number[], apiKey?: string): Promise<any | null> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}/recognize`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pages, api_key: apiKey }),
+                });
+                if (!resp.ok) {
+                    const text = await resp.text();
+                    throw new Error(text || '识别请求失败');
+                }
+                return await resp.json();
+            } catch (e) {
+                console.error('recognizePages错误:', e);
+                return null;
+            }
+        },
+        [API_BASE]
+    );
+
+    const cancelOcr = useCallback(
+        async (docId: string): Promise<boolean> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}/ocr/cancel`, {
+                    method: 'POST',
+                });
+                return resp.ok;
+            } catch (e) {
+                console.error('cancelOcr错误:', e);
+                return false;
+            }
+        },
+        [API_BASE]
+    );
+
     const getChatHistory = useCallback(
         async (docId: string): Promise<ChatMessage[]> => {
             try {
@@ -410,7 +446,7 @@ export function useVectorSearch() {
     );
 
     const watchProgress = useCallback(
-        (docId: string, onProgress: (progress: any) => void): () => void => {
+        (docId: string, onProgress: (progress: any) => void): (() => void) => {
             const eventSource = new EventSource(`${API_BASE}/documents/${docId}/progress`);
 
             eventSource.addEventListener('progress', (event) => {
@@ -444,6 +480,8 @@ export function useVectorSearch() {
         listHistory,
         deleteDocument,
         attachPdf,
+        recognizePages,
+        cancelOcr,
         getChatHistory,
         getComplianceHistory,
         watchProgress,

@@ -40,6 +40,8 @@ HIGH_CONFIDENCE_PATTERNS: Sequence[tuple[str, str]] = (
 )
 
 SUSPECT_CHAR_SET = set("澶鍙鏂娌璇锛銆鈥锟")
+NON_ASCII_RUN_RE = re.compile(r"[^\x00-\x7F]{3,}")
+CJK_RE = re.compile(r"[\u3400-\u9FFF]")
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,16 @@ def line_has_mojibake(line: str) -> str | None:
     for pattern, reason in HIGH_CONFIDENCE_PATTERNS:
         if pattern in line:
             return reason
+
+    # High-confidence recovery check for UTF-8 <-> GBK mojibake chunks.
+    for chunk in NON_ASCII_RUN_RE.findall(line):
+        try:
+            recovered = chunk.encode("gbk").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+
+        if recovered != chunk and CJK_RE.search(recovered):
+            return "gbk_utf8_roundtrip"
 
     suspect_char_hits = sum(1 for ch in line if ch in SUSPECT_CHAR_SET)
     if suspect_char_hits >= 3:

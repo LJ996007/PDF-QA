@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - 建议在 PowerShell 中先执行 `chcp 65001`，再查看/编辑含中文文件，降低乱码风险。
 - 编辑器统一使用 UTF-8（无 BOM），避免在不同工具间来回切换时发生转码污染。
-- 提交前可运行 `cd frontend && npm run check:mojibake` 做基础乱码扫描（当前为告警模式，不阻断提交）。
+- 提交前运行 `cd frontend && npm run lint:mojibake`，发现乱码会直接失败（阻断模式）。
+- 如需只看告警不阻断，可运行 `cd frontend && npm run check:mojibake:warn`。
+- 启用提交钩子：`git config core.hooksPath .githooks`（仓库内 `pre-commit` 会自动执行乱码检查）。
 
 ## 项目概述
 

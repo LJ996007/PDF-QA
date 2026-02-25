@@ -7,8 +7,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "lint:mojibake": "python ../scripts/check_mojibake.py --targets src ../backend/app/routers ../backend/main.py",
     "preview": "vite preview",
-    "check:mojibake": "python ../scripts/check_mojibake.py --warn-only"
+    "check:mojibake": "npm run check:mojibake:warn",
+    "check:mojibake:warn": "python ../scripts/check_mojibake.py --targets src ../backend/app/routers ../backend/main.py --warn-only"
   },
   "dependencies": {
     "immer": "^11.1.3",

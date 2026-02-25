@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -34,9 +35,22 @@ router = APIRouter()
 document_progress: Dict[str, ProgressEvent] = {}
 documents: Dict[str, dict] = {}
 document_locks: Dict[str, asyncio.Lock] = {}
+ocr_queue: "asyncio.Queue[OCRQueueJob]" = asyncio.Queue()
+ocr_worker_task: Optional[asyncio.Task] = None
+ocr_jobs_by_doc: Dict[str, Set[int]] = {}
+ocr_cancel_flags: Set[str] = set()
+ocr_queue_lock: Optional[asyncio.Lock] = None
 
 KEEP_PDF = os.getenv("KEEP_PDF", "1").strip().lower() in {"1", "true", "yes", "y"}
 VALID_OCR_STATUS = {"unrecognized", "processing", "recognized", "failed"}
+
+
+@dataclass
+class OCRQueueJob:
+    doc_id: str
+    pages: List[int]
+    api_key: Optional[str] = None
+    source: str = "manual"
 
 
 def _now_iso_utc() -> str:
@@ -122,6 +136,13 @@ def _get_or_create_doc_lock(doc_id: str) -> asyncio.Lock:
     return lock
 
 
+def _get_ocr_queue_lock() -> asyncio.Lock:
+    global ocr_queue_lock
+    if ocr_queue_lock is None:
+        ocr_queue_lock = asyncio.Lock()
+    return ocr_queue_lock
+
+
 def _ensure_status_map(doc: dict) -> Dict[int, str]:
     total_pages = int(doc.get("total_pages") or 0)
     status_map = _coerce_page_status_map(doc.get("page_ocr_status"))
@@ -183,6 +204,10 @@ def _persist_doc_meta(doc_id: str, status: Optional[str] = None) -> None:
     if not keep_pdf:
         file_path = None
 
+    initial_ocr_required_pages = doc.get("initial_ocr_required_pages")
+    if initial_ocr_required_pages is None:
+        initial_ocr_required_pages = existing.get("initial_ocr_required_pages") or []
+
     payload = {
         "doc_id": doc_id,
         "sha256": doc.get("sha256") or existing.get("sha256") or "",
@@ -190,6 +215,7 @@ def _persist_doc_meta(doc_id: str, status: Optional[str] = None) -> None:
         "created_at": doc.get("created_at") or existing.get("created_at") or _now_iso_utc(),
         "status": status or existing.get("status") or "completed",
         "total_pages": int(doc.get("total_pages") or existing.get("total_pages") or 0),
+        "initial_ocr_required_pages": _sorted_unique_pages(initial_ocr_required_pages),
         "ocr_required_pages": list(doc.get("ocr_required_pages") or []),
         "recognized_pages": list(doc.get("recognized_pages") or []),
         "page_ocr_status": doc.get("page_ocr_status") or {},
@@ -265,6 +291,18 @@ def _load_doc_meta_into_memory(meta: dict) -> None:
     required_from_meta = set(_sorted_unique_pages(meta.get("ocr_required_pages") or []))
     recognized_from_payload = _extract_recognized_pages_from_ocr_payload(doc_id)
     status_map = _coerce_page_status_map(meta.get("page_ocr_status"))
+    initial_required_from_meta = meta.get("initial_ocr_required_pages")
+    if isinstance(initial_required_from_meta, list):
+        initial_required_pages = set(_sorted_unique_pages(initial_required_from_meta))
+    else:
+        # Backfill baseline for legacy records that do not have initial_ocr_required_pages.
+        initial_required_pages = set(required_from_meta)
+        initial_required_pages.update(recognized_from_payload)
+        initial_required_pages.update(
+            page_num
+            for page_num, page_status in status_map.items()
+            if page_status in {"unrecognized", "processing", "failed"}
+        )
 
     recognized = recognized_from_meta | recognized_from_payload
 
@@ -285,6 +323,7 @@ def _load_doc_meta_into_memory(meta: dict) -> None:
         "sha256": meta.get("sha256") or "",
         "created_at": meta.get("created_at") or _now_iso_utc(),
         "total_pages": total_pages,
+        "initial_ocr_required_pages": sorted(initial_required_pages),
         "recognized_pages": sorted(recognized),
         "ocr_required_pages": sorted(required_from_meta),
         "page_ocr_status": status_map,
@@ -389,6 +428,232 @@ def _normalize_ocr_mode(mode: str) -> str:
     return "full" if mode == "full" else "manual"
 
 
+def _set_doc_progress(
+    doc_id: str,
+    stage: str,
+    current: int,
+    message: str,
+    total: int = 100,
+) -> None:
+    document_progress[doc_id] = ProgressEvent(
+        stage=stage,
+        current=max(0, min(current, total)),
+        total=total,
+        message=message,
+        document_id=doc_id,
+    )
+
+
+async def _release_queued_pages(doc_id: str, pages: List[int]) -> None:
+    if not pages:
+        return
+    lock = _get_ocr_queue_lock()
+    async with lock:
+        pending = ocr_jobs_by_doc.get(doc_id)
+        if not pending:
+            return
+        for page in pages:
+            pending.discard(page)
+        if not pending:
+            ocr_jobs_by_doc.pop(doc_id, None)
+
+
+async def _has_pending_queued_pages(doc_id: str) -> bool:
+    lock = _get_ocr_queue_lock()
+    async with lock:
+        return bool(ocr_jobs_by_doc.get(doc_id))
+
+
+def _cleanup_temp_pdf_if_needed(doc_id: str) -> None:
+    doc = documents.get(doc_id)
+    if not doc:
+        return
+    if bool(doc.get("keep_pdf")):
+        return
+
+    file_path = doc.get("file_path")
+    if file_path and os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+        except Exception as exc:
+            logger.warning("Failed to remove temporary PDF for %s: %s", doc_id, str(exc))
+            return
+
+    doc["file_path"] = None
+    document_store.upsert_doc(
+        {
+            "doc_id": doc_id,
+            "keep_pdf": False,
+            "pdf_path": None,
+        }
+    )
+    _persist_doc_meta(
+        doc_id,
+        status=(document_store.get_by_doc_id(doc_id) or {}).get("status", "completed"),
+    )
+
+
+async def _finalize_doc_after_ocr_queue(doc_id: str) -> None:
+    lock = _get_ocr_queue_lock()
+    async with lock:
+        pending = bool(ocr_jobs_by_doc.get(doc_id))
+    if pending:
+        return
+    _cleanup_temp_pdf_if_needed(doc_id)
+
+
+async def enqueue_ocr_job(
+    doc_id: str,
+    pages: List[int],
+    api_key: Optional[str] = None,
+    source: str = "manual",
+) -> List[int]:
+    await start_ocr_worker()
+
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    doc = documents.get(doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    file_path = doc.get("file_path")
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=400, detail="该文档未保存 PDF，无法进行 OCR")
+
+    total_pages = int(doc.get("total_pages") or 0)
+    requested = _sorted_unique_pages(pages)
+    valid_pages = [page for page in requested if 1 <= page <= total_pages]
+    if not valid_pages:
+        return []
+
+    queued_pages: List[int] = []
+    queue_lock = _get_ocr_queue_lock()
+    async with queue_lock:
+        ocr_cancel_flags.discard(doc_id)
+        pending = ocr_jobs_by_doc.setdefault(doc_id, set())
+        status_map = _ensure_status_map(doc)
+
+        for page in valid_pages:
+            status = status_map.get(page, "unrecognized")
+            if status in {"recognized", "processing"}:
+                continue
+            if page in pending:
+                continue
+            pending.add(page)
+            queued_pages.append(page)
+
+    if queued_pages:
+        await ocr_queue.put(OCRQueueJob(doc_id=doc_id, pages=queued_pages, api_key=api_key, source=source))
+
+    if queued_pages:
+        _set_doc_progress(
+            doc_id,
+            stage="ocr",
+            current=0,
+            message=f"已加入后台 OCR 队列（{len(queued_pages)} 页）",
+        )
+    return queued_pages
+
+
+async def run_ocr_worker() -> None:
+    while True:
+        job = await ocr_queue.get()
+        try:
+            doc_id = job.doc_id
+            pages = list(job.pages or [])
+            if not pages:
+                continue
+
+            if not ensure_document_loaded(doc_id):
+                await _release_queued_pages(doc_id, pages)
+                continue
+
+            if doc_id in ocr_cancel_flags:
+                await _release_queued_pages(doc_id, pages)
+                if not await _has_pending_queued_pages(doc_id):
+                    _set_doc_progress(doc_id, stage="completed", current=100, message="OCR 任务已取消")
+                    await _finalize_doc_after_ocr_queue(doc_id)
+                continue
+
+            total = len(pages)
+            failures = 0
+            processed_pages: List[int] = []
+            canceled = False
+
+            for idx, page_num in enumerate(pages, start=1):
+                if doc_id in ocr_cancel_flags:
+                    canceled = True
+                    break
+
+                _set_doc_progress(
+                    doc_id,
+                    stage="ocr",
+                    current=int((idx - 1) / max(total, 1) * 100),
+                    message=f"后台识别中（{idx}/{total}）...",
+                )
+                try:
+                    await recognize_document_page(doc_id, page_num, api_key=job.api_key)
+                except Exception as exc:
+                    failures += 1
+                    logger.warning("Failed to recognize page %s of %s: %s", page_num, doc_id, str(exc))
+                finally:
+                    processed_pages.append(page_num)
+                    await _release_queued_pages(doc_id, [page_num])
+
+            if canceled:
+                remaining = [page for page in pages if page not in set(processed_pages)]
+                await _release_queued_pages(doc_id, remaining)
+                if not await _has_pending_queued_pages(doc_id):
+                    _set_doc_progress(doc_id, stage="completed", current=100, message="OCR 任务已取消")
+                    await _finalize_doc_after_ocr_queue(doc_id)
+                continue
+
+            doc_local = documents.get(doc_id)
+            if doc_local:
+                _sync_ocr_sets(doc_local)
+                _persist_doc_meta(doc_id, status="completed")
+
+            if await _has_pending_queued_pages(doc_id):
+                _set_doc_progress(
+                    doc_id,
+                    stage="ocr",
+                    current=0,
+                    message="OCR 队列中仍有待处理页面",
+                )
+            else:
+                done_message = f"后台 OCR 完成：{total - failures}/{total} 页"
+                if failures:
+                    done_message += f"，失败 {failures} 页"
+                _set_doc_progress(doc_id, stage="completed", current=100, message=done_message)
+                await _finalize_doc_after_ocr_queue(doc_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unexpected error in OCR worker")
+        finally:
+            ocr_queue.task_done()
+
+
+async def start_ocr_worker() -> None:
+    global ocr_worker_task
+    if ocr_worker_task is None or ocr_worker_task.done():
+        ocr_worker_task = asyncio.create_task(run_ocr_worker(), name="ocr-worker")
+
+
+async def stop_ocr_worker() -> None:
+    global ocr_worker_task
+    if ocr_worker_task is None:
+        return
+    ocr_worker_task.cancel()
+    try:
+        await ocr_worker_task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        ocr_worker_task = None
+
+
 async def _run_ocr(
     image_base64: str,
     page_num: int,
@@ -478,12 +743,12 @@ async def recognize_document_page(doc_id: str, page_num: int, api_key: Optional[
                 "chunks": [],
                 "status": "processing",
                 "already_recognized": False,
-                "message": "页面OCR正在进行中",
+                "message": "页面 OCR 正在进行中",
             }
 
         file_path = doc.get("file_path") or ""
         if not file_path or not os.path.exists(file_path):
-            raise HTTPException(status_code=400, detail="该文档未保存PDF，无法进行OCR")
+            raise HTTPException(status_code=400, detail="该文档未保存 PDF，无法进行 OCR")
 
         target_page = _get_target_page(doc, page_num)
         cached_image_base64 = getattr(target_page, "image_base64", None) if target_page else None
@@ -558,7 +823,7 @@ async def recognize_document_page(doc_id: str, page_num: int, api_key: Optional[
             "status": "recognized",
             "already_recognized": False,
             "indexed_count": int(indexed_count),
-            "message": "页面OCR完成",
+            "message": "页面 OCR 完成",
         }
     except HTTPException as exc:
         async with lock:
@@ -630,6 +895,7 @@ async def process_document_async(
             "sha256": sha256,
             "created_at": created_at,
             "total_pages": total_pages,
+            "initial_ocr_required_pages": list(ocr_required),
             "recognized_pages": recognized_pages,
             "ocr_required_pages": ocr_required,
             "page_ocr_status": page_ocr_status,
@@ -654,6 +920,7 @@ async def process_document_async(
                 "created_at": created_at,
                 "status": "processing",
                 "total_pages": total_pages,
+                "initial_ocr_required_pages": list(ocr_required),
                 "ocr_required_pages": list(doc.get("ocr_required_pages") or []),
                 "recognized_pages": list(doc.get("recognized_pages") or []),
                 "page_ocr_status": doc.get("page_ocr_status") or {},
@@ -678,70 +945,56 @@ async def process_document_async(
 
         if ocr_mode == "full":
             pages_to_recognize = list(doc.get("ocr_required_pages") or [])
-            total_to_recognize = len(pages_to_recognize)
-            failures = 0
-
-            for idx, page_num in enumerate(pages_to_recognize, start=1):
-                current = 45 + int((idx - 1) / max(total_to_recognize, 1) * 50)
-                document_progress[doc_id] = ProgressEvent(
-                    stage="ocr",
-                    current=current,
-                    total=100,
-                    message=f"正在识别页面（{idx}/{total_to_recognize}）...",
-                    document_id=doc_id,
+            if not pages_to_recognize:
+                _persist_doc_meta(doc_id, status="completed")
+                _set_doc_progress(
+                    doc_id,
+                    stage="completed",
+                    current=100,
+                    message=f"处理完成：已识别 {len(doc.get('recognized_pages') or [])}/{total_pages} 页",
                 )
-                try:
-                    await recognize_document_page(doc_id, page_num, api_key=api_key)
-                except HTTPException as exc:
-                    failures += 1
-                    logger.warning("OCR failed for %s page %s: %s", doc_id, page_num, exc.detail)
-                except Exception as exc:
-                    failures += 1
-                    logger.warning("OCR failed for %s page %s: %s", doc_id, page_num, str(exc))
-
-            _sync_ocr_sets(doc)
-            recognized_count = len(doc.get("recognized_pages") or [])
-            if recognized_count == 0 and total_pages > 0:
-                _persist_doc_meta(doc_id, status="failed")
-                document_progress[doc_id] = ProgressEvent(
-                    stage="failed",
-                    current=0,
-                    total=100,
-                    message="没有可索引页面，请检查OCR配置。",
-                    document_id=doc_id,
-                )
+                if not effective_keep_pdf:
+                    _cleanup_temp_pdf_if_needed(doc_id)
                 return
 
-            message = f"处理完成：已识别 {recognized_count}/{total_pages} 页"
-            if failures:
-                message += f"，失败 {failures} 页"
+            queued_pages = await enqueue_ocr_job(
+                doc_id=doc_id,
+                pages=pages_to_recognize,
+                api_key=api_key,
+                source="upload_full",
+            )
+            if not queued_pages:
+                _persist_doc_meta(doc_id, status="completed")
+                _set_doc_progress(
+                    doc_id,
+                    stage="completed",
+                    current=100,
+                    message=f"处理完成：已识别 {len(doc.get('recognized_pages') or [])}/{total_pages} 页",
+                )
+                if not effective_keep_pdf:
+                    _cleanup_temp_pdf_if_needed(doc_id)
+                return
 
-            _persist_doc_meta(doc_id, status="completed")
-            document_progress[doc_id] = ProgressEvent(
-                stage="completed",
-                current=100,
-                total=100,
-                message=message,
-                document_id=doc_id,
+            _persist_doc_meta(doc_id, status="processing")
+            _set_doc_progress(
+                doc_id,
+                stage="ocr",
+                current=45,
+                message=f"已加入后台 OCR 队列（{len(queued_pages)} 页）",
             )
-        else:
-            _persist_doc_meta(doc_id, status="completed")
-            document_progress[doc_id] = ProgressEvent(
-                stage="completed",
-                current=100,
-                total=100,
-                message="文档已加载，可在网格视图选择页面进行OCR。",
-                document_id=doc_id,
-            )
+            return
+
+        _persist_doc_meta(doc_id, status="completed")
+        document_progress[doc_id] = ProgressEvent(
+            stage="completed",
+            current=100,
+            total=100,
+            message="文档已加载，可在网格视图选择页面进行 OCR。",
+            document_id=doc_id,
+        )
 
         if not effective_keep_pdf:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                doc["file_path"] = None
-                _persist_doc_meta(doc_id, status="completed")
-            except Exception as exc:
-                logger.warning("Failed to remove temporary PDF for %s: %s", doc_id, str(exc))
+            _cleanup_temp_pdf_if_needed(doc_id)
     except Exception as exc:
         logger.exception("Document processing failed for %s", doc_id)
         try:
@@ -779,7 +1032,7 @@ async def upload_document(
     ocr_mode: str = Form("manual"),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="仅支持PDF文件")
+        raise HTTPException(status_code=400, detail="仅支持 PDF 文件")
 
     ocr_mode = _normalize_ocr_mode(ocr_mode)
     content = await file.read()
@@ -951,6 +1204,7 @@ async def get_document(doc_id: str):
             "id": doc["id"],
             "name": doc["name"],
             "total_pages": int(doc.get("total_pages") or 0),
+            "initial_ocr_required_pages": list(doc.get("initial_ocr_required_pages") or []),
             "ocr_required_pages": list(doc.get("ocr_required_pages") or []),
             "recognized_pages": list(doc.get("recognized_pages") or []),
             "page_ocr_status": doc.get("page_ocr_status") or {},
@@ -965,7 +1219,7 @@ async def get_document_pdf(doc_id: str):
         raise HTTPException(status_code=404, detail="文档不存在")
     path = _resolve_pdf_path(doc_id)
     if not path:
-        raise HTTPException(status_code=404, detail="该文档未保存PDF")
+        raise HTTPException(status_code=404, detail="该文档未保存 PDF")
     return FileResponse(path, media_type="application/pdf", filename=f"{doc_id}.pdf")
 
 
@@ -975,7 +1229,7 @@ async def head_document_pdf(doc_id: str):
         raise HTTPException(status_code=404, detail="文档不存在")
     path = _resolve_pdf_path(doc_id)
     if not path:
-        raise HTTPException(status_code=404, detail="该文档未保存PDF")
+        raise HTTPException(status_code=404, detail="该文档未保存 PDF")
     return Response(status_code=200)
 
 
@@ -984,7 +1238,7 @@ async def attach_document_pdf(doc_id: str, file: UploadFile = File(...)):
     if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="仅支持PDF文件")
+        raise HTTPException(status_code=400, detail="仅支持 PDF 文件")
 
     content = await file.read()
     sha256 = hashlib.sha256(content).hexdigest()
@@ -992,7 +1246,7 @@ async def attach_document_pdf(doc_id: str, file: UploadFile = File(...)):
     meta = document_store.get_by_doc_id(doc_id) or {}
     expected_sha = str(meta.get("sha256") or "").strip().lower()
     if expected_sha and expected_sha != sha256:
-        raise HTTPException(status_code=400, detail="所选PDF与记录不匹配（SHA256不同）")
+        raise HTTPException(status_code=400, detail="所选 PDF 与记录不匹配（SHA256 不同）")
 
     upload_dir = Path("uploads")
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -1023,6 +1277,11 @@ async def attach_document_pdf(doc_id: str, file: UploadFile = File(...)):
 async def delete_document(doc_id: str):
     ensure_document_loaded(doc_id)
 
+    queue_lock = _get_ocr_queue_lock()
+    async with queue_lock:
+        ocr_cancel_flags.add(doc_id)
+        ocr_jobs_by_doc.pop(doc_id, None)
+
     doc = documents.get(doc_id)
     if doc:
         file_path = doc.get("file_path")
@@ -1050,7 +1309,7 @@ class RecognizeRequest(BaseModel):
 
 
 @router.post("/{doc_id}/recognize")
-async def recognize_pages(doc_id: str, request: RecognizeRequest, background_tasks: BackgroundTasks):
+async def recognize_pages(doc_id: str, request: RecognizeRequest):
     if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
 
@@ -1060,7 +1319,7 @@ async def recognize_pages(doc_id: str, request: RecognizeRequest, background_tas
 
     file_path = doc.get("file_path")
     if not file_path or not os.path.exists(file_path):
-        raise HTTPException(status_code=400, detail="该文档未保存PDF，无法进行OCR")
+        raise HTTPException(status_code=400, detail="该文档未保存 PDF，无法进行 OCR")
 
     total_pages = int(doc.get("total_pages") or 0)
     requested = _sorted_unique_pages(request.pages)
@@ -1068,47 +1327,51 @@ async def recognize_pages(doc_id: str, request: RecognizeRequest, background_tas
     if not valid_pages:
         raise HTTPException(status_code=400, detail="没有可识别的有效页码")
 
-    async def recognize_task() -> None:
-        total = len(valid_pages)
-        failures = 0
+    queued_pages = await enqueue_ocr_job(
+        doc_id=doc_id,
+        pages=valid_pages,
+        api_key=request.api_key,
+        source="manual_select",
+    )
+    if not queued_pages:
+        return {
+            "status": "noop",
+            "document_id": doc_id,
+            "pages": [],
+            "message": "没有新增待识别页面",
+        }
 
-        for idx, page_num in enumerate(valid_pages, start=1):
-            current = int((idx - 1) / max(total, 1) * 100)
-            document_progress[doc_id] = ProgressEvent(
-                stage="ocr",
-                current=current,
-                total=100,
-                message=f"正在识别已选页面（{idx}/{total}）...",
-                document_id=doc_id,
-            )
-            try:
-                await recognize_document_page(doc_id, page_num, api_key=request.api_key)
-            except Exception as exc:
-                failures += 1
-                logger.warning("Failed to recognize page %s of %s: %s", page_num, doc_id, str(exc))
-
-        doc_local = documents.get(doc_id)
-        if doc_local:
-            _sync_ocr_sets(doc_local)
-            _persist_doc_meta(doc_id, status="completed")
-
-        done_message = f"已完成选中页面识别：{total - failures}/{total} 页"
-        if failures:
-            done_message += f"，失败 {failures} 页"
-        document_progress[doc_id] = ProgressEvent(
-            stage="completed",
-            current=100,
-            total=100,
-            message=done_message,
-            document_id=doc_id,
-        )
-
-    background_tasks.add_task(recognize_task)
     return {
-        "status": "started",
+        "status": "queued",
+        "queued": True,
         "document_id": doc_id,
-        "pages": valid_pages,
-        "message": f"已开始识别 {len(valid_pages)} 页",
+        "pages": queued_pages,
+        "message": f"已加入后台 OCR 队列：{len(queued_pages)} 页",
+    }
+
+
+@router.post("/{doc_id}/ocr/cancel")
+async def cancel_doc_ocr(doc_id: str):
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    queue_lock = _get_ocr_queue_lock()
+    async with queue_lock:
+        ocr_cancel_flags.add(doc_id)
+        pending = len(ocr_jobs_by_doc.get(doc_id) or set())
+        ocr_jobs_by_doc.pop(doc_id, None)
+
+    _set_doc_progress(
+        doc_id,
+        stage="completed",
+        current=100,
+        message="OCR 任务取消中...",
+    )
+
+    return {
+        "status": "cancel_requested",
+        "document_id": doc_id,
+        "pending_pages": pending,
     }
 
 
@@ -1162,3 +1425,4 @@ async def get_compliance_history(doc_id: str):
     if not data:
         raise HTTPException(status_code=404, detail="暂无合规检查历史")
     return data
+

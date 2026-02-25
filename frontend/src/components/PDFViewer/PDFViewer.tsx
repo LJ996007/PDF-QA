@@ -6,18 +6,20 @@ import { PageGridItem } from './PageGridItem';
 import { usePdfLoader } from '../../hooks/usePdfLoader';
 import type { PDFLoadResult } from '../../hooks/usePdfLoader';
 import { useDocumentStore, type PageOcrStatus, type TextChunk } from '../../stores/documentStore';
+import { useVectorSearch } from '../../hooks/useVectorSearch';
 import './PDFViewer.css';
 
 interface PDFViewerProps {
     pdfUrl?: string;
     pdfFile?: File;
+    onRecognizeQueued?: (docId: string) => void;
 }
 
-const API_BASE = 'http://localhost:8000/api';
 const EMPTY_HIGHLIGHTS: TextChunk[] = [];
 
-export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
+export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecognizeQueued }) => {
     const { loadingState, loadFromUrl, loadFromFile, cleanup } = usePdfLoader();
+    const { recognizePages } = useVectorSearch();
 
     const scale = useDocumentStore((state) => state.scale);
     const setScale = useDocumentStore((state) => state.setScale);
@@ -28,22 +30,57 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
     const setViewMode = useDocumentStore((state) => state.setViewMode);
     const currentDocument = useDocumentStore((state) => state.currentDocument);
     const updateDocumentOcrStatus = useDocumentStore((state) => state.updateDocumentOcrStatus);
+    const selectedPages = useDocumentStore((state) => state.selectedPages);
+    const setSelectedPages = useDocumentStore((state) => state.setSelectedPages);
+    const activeProgress = useDocumentStore((state) => state.activeProgress);
+    const setTabProgress = useDocumentStore((state) => state.setTabProgress);
+    const activeDocId = currentDocument?.id ?? '';
 
     const [pdfResult, setPdfResult] = useState<PDFLoadResult | null>(null);
-    const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
-    const [isRecognizing, setIsRecognizing] = useState(false);
     const [pageStatuses, setPageStatuses] = useState<Record<number, PageOcrStatus>>({});
 
     const virtuosoRef = useRef<VirtuosoHandle>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const scrollerRef = useRef<HTMLElement | Window | null>(null);
     const prevScaleRef = useRef(scale);
+    const highlightsRevisionRef = useRef<Record<string, { revision: number; signature: string }>>({});
+    const manualGridRevisionRef = useRef<Record<string, number | null>>({});
+
+    const isRecognizing = activeProgress?.stage === 'ocr';
+    const highlightSignature = useMemo(
+        () => highlights
+            .map((chunk) => `${chunk.refId}:${chunk.page}:${chunk.bbox.x},${chunk.bbox.y},${chunk.bbox.w},${chunk.bbox.h}`)
+            .join('|'),
+        [highlights]
+    );
 
     useEffect(() => {
         if (currentDocument?.pageOcrStatus) {
             setPageStatuses(currentDocument.pageOcrStatus);
         }
     }, [currentDocument]);
+
+    useEffect(() => {
+        if (!activeDocId) {
+            return;
+        }
+
+        const revisions = highlightsRevisionRef.current;
+        const current = revisions[activeDocId];
+        if (!current) {
+            revisions[activeDocId] = { revision: 1, signature: highlightSignature };
+            manualGridRevisionRef.current[activeDocId] = null;
+            return;
+        }
+
+        if (current.signature === highlightSignature) {
+            return;
+        }
+
+        current.revision += 1;
+        current.signature = highlightSignature;
+        manualGridRevisionRef.current[activeDocId] = null;
+    }, [activeDocId, highlightSignature]);
 
     useEffect(() => {
         const load = async () => {
@@ -71,73 +108,60 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
             return;
         }
 
-        setSelectedPages((prev) => {
-            const next = new Set(prev);
-            if (next.has(pageNumber)) {
-                next.delete(pageNumber);
-            } else {
-                next.add(pageNumber);
-            }
-            return next;
-        });
-    }, [pageStatuses]);
+        const next = new Set(selectedPages);
+        if (next.has(pageNumber)) {
+            next.delete(pageNumber);
+        } else {
+            next.add(pageNumber);
+        }
+        setSelectedPages(Array.from(next));
+    }, [pageStatuses, selectedPages, setSelectedPages]);
 
     const handleRecognize = useCallback(async () => {
-        if (!currentDocument || selectedPages.size === 0) return;
+        if (!currentDocument || selectedPages.length === 0) return;
 
-        setIsRecognizing(true);
-        const pagesToRecognize = Array.from(selectedPages);
-
-        try {
-            const response = await fetch(`${API_BASE}/documents/${currentDocument.id}/recognize`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    pages: pagesToRecognize,
-                }),
-            });
-
-            if (!response.ok) {
-                throw new Error('识别请求失败');
-            }
-
-            setSelectedPages(new Set());
-
-            const pollInterval = setInterval(async () => {
-                try {
-                    const docResponse = await fetch(`${API_BASE}/documents/${currentDocument.id}`);
-                    if (!docResponse.ok) {
-                        clearInterval(pollInterval);
-                        setIsRecognizing(false);
-                        return;
-                    }
-
-                    const docData = await docResponse.json();
-                    const ocrStatus: Record<number, string> = docData.page_ocr_status || {};
-                    const recognizedPages: number[] = docData.recognized_pages || [];
-
-                    setPageStatuses(ocrStatus as Record<number, PageOcrStatus>);
-                    updateDocumentOcrStatus(recognizedPages, ocrStatus as Record<number, PageOcrStatus>);
-
-                    const allDone = pagesToRecognize.every(
-                        (p) => ocrStatus[p] === 'recognized' || ocrStatus[p] === 'failed'
-                    );
-                    if (allDone) {
-                        clearInterval(pollInterval);
-                        setIsRecognizing(false);
-                    }
-                } catch {
-                    clearInterval(pollInterval);
-                    setIsRecognizing(false);
-                }
-            }, 2000);
-        } catch (error) {
-            console.error('识别失败:', error);
-            setIsRecognizing(false);
+        const pagesToRecognize = [...selectedPages].sort((a, b) => a - b);
+        const response = await recognizePages(currentDocument.id, pagesToRecognize);
+        if (!response) {
+            return;
         }
-    }, [currentDocument, selectedPages, updateDocumentOcrStatus]);
+
+        const queued = Array.isArray(response.pages) ? response.pages : pagesToRecognize;
+        if (queued.length === 0) {
+            setSelectedPages([]);
+            return;
+        }
+
+        setSelectedPages([]);
+        const nextStatusMap = { ...pageStatuses };
+        queued.forEach((pageNum: number) => {
+            if (nextStatusMap[pageNum] !== 'recognized') {
+                nextStatusMap[pageNum] = 'processing';
+            }
+        });
+        setPageStatuses(nextStatusMap);
+        updateDocumentOcrStatus(
+            currentDocument.recognizedPages || [],
+            nextStatusMap as Record<number, PageOcrStatus>
+        );
+        setTabProgress(currentDocument.id, {
+            stage: 'ocr',
+            current: 0,
+            total: 100,
+            message: typeof response.message === 'string' ? response.message : '已加入后台 OCR 队列',
+            document_id: currentDocument.id,
+        });
+        onRecognizeQueued?.(currentDocument.id);
+    }, [
+        currentDocument,
+        selectedPages,
+        recognizePages,
+        setSelectedPages,
+        pageStatuses,
+        updateDocumentOcrStatus,
+        setTabProgress,
+        onRecognizeQueued,
+    ]);
 
     const highlightsByPage = useMemo(() => {
         const grouped = new Map<number, TextChunk[]>();
@@ -196,6 +220,11 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
     useEffect(() => {
         if (highlights.length > 0 && pdfResult) {
             if (viewMode === 'grid') {
+                const currentRevision = highlightsRevisionRef.current[activeDocId]?.revision ?? 0;
+                const manualRevision = manualGridRevisionRef.current[activeDocId] ?? null;
+                if (manualRevision === currentRevision) {
+                    return;
+                }
                 setViewMode('list');
                 return;
             }
@@ -203,7 +232,7 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
             const firstHighlight = highlights[0];
             scrollToHighlight(firstHighlight.page, firstHighlight.bbox, true);
         }
-    }, [highlights, pdfResult, scrollToHighlight, viewMode, setViewMode]);
+    }, [activeDocId, highlights, pdfResult, scrollToHighlight, viewMode, setViewMode]);
 
     useEffect(() => {
         const scaleChanged = prevScaleRef.current !== scale;
@@ -231,8 +260,14 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
         if (mode === viewMode) {
             return;
         }
+
+        if (mode === 'grid' && highlights.length > 0 && activeDocId) {
+            const currentRevision = highlightsRevisionRef.current[activeDocId]?.revision ?? 0;
+            manualGridRevisionRef.current[activeDocId] = currentRevision;
+        }
+
         setViewMode(mode);
-    }, [setViewMode, viewMode]);
+    }, [activeDocId, highlights.length, setViewMode, viewMode]);
 
     const renderViewModeToggle = useCallback(() => (
         <div className="view-mode-toggle" role="group" aria-label="页面浏览模式">
@@ -301,12 +336,12 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
                 <div className="pdf-toolbar">
                     {renderViewModeToggle()}
                     <span className="selection-indicator">
-                        已选 {selectedPages.size} 页
+                        已选 {selectedPages.length} 页
                     </span>
                     <button
                         className="ocr-run-btn"
                         onClick={handleRecognize}
-                        disabled={isRecognizing || selectedPages.size === 0}
+                        disabled={isRecognizing || selectedPages.length === 0}
                     >
                         {isRecognizing ? '识别中...' : '识别选中页面'}
                     </button>
@@ -323,7 +358,7 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
                                     pageNumber={pageNum}
                                     thumbnail={thumbnails[pageNum - 1]}
                                     status={pageStatuses[pageNum] || 'unrecognized'}
-                                    selected={selectedPages.has(pageNum)}
+                                    selected={selectedPages.includes(pageNum)}
                                     onClick={handlePageClick}
                                 />
                             </div>
@@ -337,6 +372,7 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
     return (
         <div className="pdf-viewer" ref={containerRef}>
             <div className="pdf-toolbar">
+                {renderViewModeToggle()}
                 <button onClick={() => handleZoom(0.8)} title="缩小">
                     <span>-</span>
                 </button>
@@ -344,7 +380,6 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
                 <button onClick={() => handleZoom(1.25)} title="放大">
                     <span>+</span>
                 </button>
-                {renderViewModeToggle()}
                 <span className="page-indicator">
                     第 {currentPage} / {pdfResult.numPages} 页
                 </span>
