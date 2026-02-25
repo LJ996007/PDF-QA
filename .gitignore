@@ -64,4 +64,5 @@ Thumbs.db
 # Logs
 *.log
 logs/
+.runtime/
 

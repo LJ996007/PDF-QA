@@ -98,8 +98,34 @@ export interface TabState {
     progress: TabProgress | null;
 }
 
+const DEFAULT_LOCAL_API_BASE_URL = 'http://localhost:8000';
+const DEFAULT_LOCAL_API_BASE_URLS = new Set<string>([
+    DEFAULT_LOCAL_API_BASE_URL,
+    'http://127.0.0.1:8000',
+]);
+
+const normalizeApiBaseUrl = (value: string): string => value.trim().replace(/\/$/, '');
+
+const getInjectedApiBaseUrl = (): string => {
+    const value = import.meta.env.VITE_API_BASE_URL;
+    if (typeof value !== 'string') return '';
+    const normalized = normalizeApiBaseUrl(value);
+    return normalized || '';
+};
+
+const getRuntimeDefaultApiBaseUrl = (): string => {
+    const injected = getInjectedApiBaseUrl();
+    return injected || DEFAULT_LOCAL_API_BASE_URL;
+};
+
+const isDefaultLocalApiBaseUrl = (value: unknown): boolean => {
+    if (typeof value !== 'string') return false;
+    const normalized = normalizeApiBaseUrl(value);
+    return DEFAULT_LOCAL_API_BASE_URLS.has(normalized);
+};
+
 const DEFAULT_CONFIG: AppConfig = {
-    apiBaseUrl: 'http://localhost:8000',
+    apiBaseUrl: getRuntimeDefaultApiBaseUrl(),
     embeddingsProvider: 'zhipu',
     zhipuApiKey: '',
     baiduApiKey: '',
@@ -307,6 +333,7 @@ interface DocumentState {
 
 const initializeConfig = (): AppConfig => {
     const stored = localStorage.getItem('pdf-qa-storage');
+    const injectedApiBaseUrl = getInjectedApiBaseUrl();
 
     if (!stored) {
         const examplePrompts = createExamplePrompts();
@@ -345,6 +372,13 @@ const initializeConfig = (): AppConfig => {
             const examplePrompts = createExamplePrompts();
             config.customPrompts = examplePrompts;
             config.selectedPromptId = examplePrompts[0].id;
+        }
+
+        const configApiBaseUrl = typeof config.apiBaseUrl === 'string'
+            ? normalizeApiBaseUrl(config.apiBaseUrl)
+            : '';
+        if (injectedApiBaseUrl && (!configApiBaseUrl || isDefaultLocalApiBaseUrl(configApiBaseUrl))) {
+            config.apiBaseUrl = injectedApiBaseUrl;
         }
 
         return { ...DEFAULT_CONFIG, ...config };
