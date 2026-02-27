@@ -9,6 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 提交前运行 `cd frontend && npm run lint:mojibake`，发现乱码会直接失败（阻断模式）。
 - 如需只看告警不阻断，可运行 `cd frontend && npm run check:mojibake:warn`。
 - 启用提交钩子：`git config core.hooksPath .githooks`（仓库内 `pre-commit` 会自动执行乱码检查）。
+- 长期档案与记忆（必读）：
+  - `docs/encoding_work_archive.md`
+  - `docs/encoding_memory.md`
 
 ## 项目概述
 

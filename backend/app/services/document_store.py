@@ -10,6 +10,8 @@ Storage layout (relative to backend working dir):
       {doc_id}.json
     compliance/
       {doc_id}.json
+    multimodal_audit/
+      {doc_id}.json
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ class DocumentStore:
         self.ocr_dir = self.base_dir / "ocr"
         self.chat_dir = self.base_dir / "chat"
         self.compliance_dir = self.base_dir / "compliance"
+        self.multimodal_audit_dir = self.base_dir / "multimodal_audit"
         self._lock = threading.RLock()
 
     def _ensure_dirs(self) -> None:
@@ -43,6 +46,7 @@ class DocumentStore:
         self.ocr_dir.mkdir(parents=True, exist_ok=True)
         self.chat_dir.mkdir(parents=True, exist_ok=True)
         self.compliance_dir.mkdir(parents=True, exist_ok=True)
+        self.multimodal_audit_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_index_unlocked(self) -> Dict[str, Any]:
         self._ensure_dirs()
@@ -168,6 +172,14 @@ class DocumentStore:
                     ocr_path.unlink()
             except Exception:
                 pass
+
+            # Best-effort delete multimodal audit history.
+            try:
+                audit_path = self.multimodal_audit_dir / f"{doc_id}.json"
+                if audit_path.exists():
+                    audit_path.unlink()
+            except Exception:
+                pass
             return changed
 
     def _load_chat_unlocked(self, doc_id: str) -> Dict[str, Any]:
@@ -240,6 +252,44 @@ class DocumentStore:
             self._ensure_dirs()
             try:
                 path = self.compliance_dir / f"{doc_id}.json"
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+
+    def append_multimodal_audit(self, doc_id: str, job_payload: Dict[str, Any], max_items: int = 20) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            path = self.multimodal_audit_dir / f"{doc_id}.json"
+            history = self.load_multimodal_audit(doc_id) or {"version": 1, "doc_id": doc_id, "jobs": []}
+            jobs = history.get("jobs") or []
+            jobs.insert(0, job_payload)
+            history["jobs"] = jobs[: max(1, int(max_items))]
+            _atomic_write_json(path, history)
+
+    def load_multimodal_audit(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        self._ensure_dirs()
+        path = self.multimodal_audit_dir / f"{doc_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return None
+            jobs = data.get("jobs")
+            if not isinstance(jobs, list):
+                data["jobs"] = []
+            data.setdefault("version", 1)
+            data.setdefault("doc_id", doc_id)
+            return data
+        except Exception:
+            return None
+
+    def delete_multimodal_audit(self, doc_id: str) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            try:
+                path = self.multimodal_audit_dir / f"{doc_id}.json"
                 if path.exists():
                     path.unlink()
             except Exception:

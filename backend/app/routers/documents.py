@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,12 +21,26 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from app.models.schemas import DocumentUploadResponse, OCRChunk, ProgressEvent
+from app.models.schemas import (
+    DocumentUploadResponse,
+    MultimodalAuditJobRequest,
+    MultimodalAuditJobResponse,
+    OCRChunk,
+    PageContent,
+    ProgressEvent,
+)
 from app.services.baidu_ocr import baidu_ocr_gateway
 from app.services.document_store import document_store
 from app.services.local_ocr import local_ocr_gateway
+from app.services.mm_provider import PageImageInput
+from app.services.multimodal_audit_service import multimodal_audit_service
 from app.services.parser import generate_thumbnail, get_ocr_required_pages, process_document, render_page_to_image
 from app.services.rag_engine import rag_engine
+from app.services.word_converter import (
+    WordConversionError,
+    convert_to_pdf,
+    extract_markdown_with_markitdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +55,17 @@ ocr_worker_task: Optional[asyncio.Task] = None
 ocr_jobs_by_doc: Dict[str, Set[int]] = {}
 ocr_cancel_flags: Set[str] = set()
 ocr_queue_lock: Optional[asyncio.Lock] = None
+audit_queue: "asyncio.Queue[AuditQueueJob]" = asyncio.Queue()
+audit_worker_task: Optional[asyncio.Task] = None
+audit_queue_lock: Optional[asyncio.Lock] = None
+audit_jobs: Dict[str, Dict[str, Any]] = {}
+audit_progress: Dict[str, Dict[str, Any]] = {}
 
 KEEP_PDF = os.getenv("KEEP_PDF", "1").strip().lower() in {"1", "true", "yes", "y"}
 VALID_OCR_STATUS = {"unrecognized", "processing", "recognized", "failed"}
+ENABLE_MULTIMODAL_AUDIT = os.getenv("ENABLE_MULTIMODAL_AUDIT", "1").strip().lower() in {"1", "true", "yes", "y"}
+ALLOWED_UPLOAD_FORMATS = {"pdf", "doc", "docx"}
+WORD_UPLOAD_FORMATS = {"doc", "docx"}
 
 
 @dataclass
@@ -51,6 +74,14 @@ class OCRQueueJob:
     pages: List[int]
     api_key: Optional[str] = None
     source: str = "manual"
+
+
+@dataclass
+class AuditQueueJob:
+    job_id: str
+    doc_id: str
+    request: MultimodalAuditJobRequest
+    allowed_pages: List[int]
 
 
 def _now_iso_utc() -> str:
@@ -89,6 +120,128 @@ def _resolve_pdf_path(doc_id: str) -> Optional[str]:
     return path
 
 
+def _detect_source_format(filename: str) -> str:
+    ext = Path(filename or "").suffix.lower().lstrip(".")
+    return ext if ext in ALLOWED_UPLOAD_FORMATS else ""
+
+
+def _is_word_source(source_format: str) -> bool:
+    return source_format in WORD_UPLOAD_FORMATS
+
+
+def _compute_text_quality(pages: List[PageContent]) -> Dict[str, float]:
+    total_pages = len(pages)
+    if total_pages <= 0:
+        return {"readable_ratio": 0.0, "empty_ratio": 1.0, "char_count": 0.0, "low_quality": 1.0}
+
+    empty_pages = 0
+    readable_chars = 0
+    total_chars = 0
+
+    for page in pages:
+        text = (page.text or "").strip()
+        if not text:
+            empty_pages += 1
+            continue
+
+        compact = re.sub(r"\s+", "", text)
+        if not compact:
+            empty_pages += 1
+            continue
+
+        total_chars += len(compact)
+        readable_chars += sum(
+            1 for ch in compact if ch.isalnum() or ("\u4e00" <= ch <= "\u9fff")
+        )
+
+    readable_ratio = (readable_chars / total_chars) if total_chars else 0.0
+    empty_ratio = empty_pages / float(total_pages)
+    low_quality = total_chars < 300 or empty_ratio >= 0.5 or readable_ratio < 0.6
+    return {
+        "readable_ratio": float(readable_ratio),
+        "empty_ratio": float(empty_ratio),
+        "char_count": float(total_chars),
+        "low_quality": 1.0 if low_quality else 0.0,
+    }
+
+
+def _split_markdown_to_pages(markdown_text: str, total_pages: int) -> List[str]:
+    cleaned = (markdown_text or "").strip()
+    if not cleaned:
+        return []
+
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", cleaned) if p.strip()]
+    if not paragraphs:
+        return []
+
+    target_pages = max(int(total_pages), 1)
+    total_chars = sum(len(p) for p in paragraphs)
+    target_chars_per_page = max(total_chars // target_pages, 200)
+
+    output: List[str] = []
+    idx = 0
+    for page_idx in range(target_pages):
+        if idx >= len(paragraphs):
+            output.append("")
+            continue
+
+        chunks: List[str] = []
+        current_chars = 0
+        remaining_pages = target_pages - page_idx
+        remaining_paragraphs = len(paragraphs) - idx
+        must_take_one = remaining_paragraphs <= remaining_pages
+
+        while idx < len(paragraphs):
+            para = paragraphs[idx]
+            if chunks and current_chars >= target_chars_per_page and not must_take_one:
+                break
+            chunks.append(para)
+            current_chars += len(para)
+            idx += 1
+            must_take_one = False
+
+        output.append("\n\n".join(chunks).strip())
+
+    if idx < len(paragraphs):
+        tail = "\n\n".join(paragraphs[idx:]).strip()
+        if output:
+            output[-1] = (output[-1] + "\n\n" + tail).strip() if output[-1] else tail
+        else:
+            output.append(tail)
+    return output
+
+
+def _apply_docx_markdown_fallback(pages: List[PageContent], markdown_text: str) -> bool:
+    if not pages:
+        return False
+
+    fallback_page_texts = _split_markdown_to_pages(markdown_text, len(pages))
+    if not fallback_page_texts:
+        return False
+
+    changed = False
+    for idx, page in enumerate(pages):
+        fallback_text = fallback_page_texts[idx].strip() if idx < len(fallback_page_texts) else ""
+        if not fallback_text:
+            continue
+
+        base_text = (page.text or "").strip()
+        if page.type == "ocr" or not base_text:
+            page.text = fallback_text
+            page.type = "native"
+            page.coordinates = None
+            page.confidence = max(float(page.confidence or 0.0), 0.65)
+            changed = True
+            continue
+
+        if len(fallback_text) > max(len(base_text) * 2, 1200):
+            page.text = f"{base_text}\n{fallback_text}"
+            page.coordinates = None
+            changed = True
+
+    return changed
+
+
 def _render_thumbnails_from_pdf(file_path: str) -> List[str]:
     if not file_path or not os.path.exists(file_path):
         return []
@@ -111,6 +264,46 @@ def _sorted_unique_pages(raw_pages: Any) -> List[int]:
             continue
         pages.add(page_num)
     return sorted(pages)
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _update_doc_metrics(doc: dict) -> None:
+    """Keep metrics fields internally consistent before persistence."""
+    chunk_count = _to_int(doc.get("chunk_count"), 0)
+    doc["chunk_count"] = chunk_count
+    indexed_chunks = _to_int(doc.get("indexed_chunks"), chunk_count)
+    doc["indexed_chunks"] = max(indexed_chunks, chunk_count)
+
+    triggered_pages = _sorted_unique_pages(doc.get("ocr_triggered_page_numbers") or [])
+    doc["ocr_triggered_page_numbers"] = triggered_pages
+    doc["ocr_triggered_pages"] = len(triggered_pages)
+
+    conversion_failed = str(doc.get("conversion_status") or "").strip().lower() == "failed"
+    conversion_fail_count = _to_int(doc.get("conversion_fail_count"), 0)
+    if conversion_failed and conversion_fail_count < 1:
+        conversion_fail_count = 1
+    doc["conversion_fail_count"] = conversion_fail_count
+
+
+def _mark_ocr_triggered(doc: dict, page_num: int) -> None:
+    pages = set(_sorted_unique_pages(doc.get("ocr_triggered_page_numbers") or []))
+    if page_num > 0:
+        pages.add(int(page_num))
+    doc["ocr_triggered_page_numbers"] = sorted(pages)
+    doc["ocr_triggered_pages"] = len(pages)
 
 
 def _coerce_page_status_map(raw_map: Any) -> Dict[int, str]:
@@ -141,6 +334,13 @@ def _get_ocr_queue_lock() -> asyncio.Lock:
     if ocr_queue_lock is None:
         ocr_queue_lock = asyncio.Lock()
     return ocr_queue_lock
+
+
+def _get_audit_queue_lock() -> asyncio.Lock:
+    global audit_queue_lock
+    if audit_queue_lock is None:
+        audit_queue_lock = asyncio.Lock()
+    return audit_queue_lock
 
 
 def _ensure_status_map(doc: dict) -> Dict[int, str]:
@@ -197,6 +397,7 @@ def _persist_doc_meta(doc_id: str, status: Optional[str] = None) -> None:
         return
 
     _sync_ocr_sets(doc)
+    _update_doc_metrics(doc)
     existing = document_store.get_by_doc_id(doc_id) or {}
 
     keep_pdf = bool(doc.get("keep_pdf"))
@@ -224,6 +425,49 @@ def _persist_doc_meta(doc_id: str, status: Optional[str] = None) -> None:
         "chunk_count": int(doc.get("chunk_count") or existing.get("chunk_count") or 0),
         "keep_pdf": keep_pdf,
         "pdf_path": file_path or existing.get("pdf_path"),
+        "source_format": doc.get("source_format") or existing.get("source_format") or "pdf",
+        "converted_from": doc.get("converted_from") or existing.get("converted_from"),
+        "conversion_status": doc.get("conversion_status") or existing.get("conversion_status") or "ok",
+        "conversion_ms": (
+            int(doc.get("conversion_ms"))
+            if doc.get("conversion_ms") is not None
+            else (
+                int(existing.get("conversion_ms"))
+                if existing.get("conversion_ms") is not None
+                else None
+            )
+        ),
+        "conversion_fail_count": _to_int(
+            doc.get("conversion_fail_count"),
+            _to_int(existing.get("conversion_fail_count"), 0),
+        ),
+        "ocr_triggered_pages": _to_int(
+            doc.get("ocr_triggered_pages"),
+            _to_int(existing.get("ocr_triggered_pages"), 0),
+        ),
+        "ocr_triggered_page_numbers": _sorted_unique_pages(
+            doc.get("ocr_triggered_page_numbers")
+            or existing.get("ocr_triggered_page_numbers")
+            or []
+        ),
+        "indexed_chunks": _to_int(
+            doc.get("indexed_chunks"),
+            _to_int(existing.get("indexed_chunks"), _to_int(doc.get("chunk_count"), 0)),
+        ),
+        "avg_context_tokens": (
+            _to_float(doc.get("avg_context_tokens"))
+            if doc.get("avg_context_tokens") is not None
+            else (
+                _to_float(existing.get("avg_context_tokens"))
+                if existing.get("avg_context_tokens") is not None
+                else None
+            )
+        ),
+        "context_query_count": _to_int(
+            doc.get("context_query_count"),
+            _to_int(existing.get("context_query_count"), 0),
+        ),
+        "text_fallback_used": bool(doc.get("text_fallback_used") or existing.get("text_fallback_used")),
     }
     document_store.upsert_doc(payload)
 
@@ -305,6 +549,9 @@ def _load_doc_meta_into_memory(meta: dict) -> None:
         )
 
     recognized = recognized_from_meta | recognized_from_payload
+    ocr_triggered_page_numbers = _sorted_unique_pages(meta.get("ocr_triggered_page_numbers") or [])
+    if not ocr_triggered_page_numbers and recognized_from_payload:
+        ocr_triggered_page_numbers = sorted(recognized_from_payload)
 
     for page_num in range(1, total_pages + 1):
         if page_num in status_map:
@@ -332,6 +579,29 @@ def _load_doc_meta_into_memory(meta: dict) -> None:
         "file_path": meta.get("pdf_path"),
         "keep_pdf": bool(meta.get("keep_pdf")),
         "chunk_count": int(meta.get("chunk_count") or 0),
+        "source_format": meta.get("source_format") or "pdf",
+        "converted_from": meta.get("converted_from"),
+        "conversion_status": meta.get("conversion_status") or "ok",
+        "conversion_ms": (
+            int(meta.get("conversion_ms")) if meta.get("conversion_ms") is not None else None
+        ),
+        "conversion_fail_count": _to_int(
+            meta.get("conversion_fail_count"),
+            1 if (meta.get("conversion_status") == "failed") else 0,
+        ),
+        "ocr_triggered_pages": _to_int(
+            meta.get("ocr_triggered_pages"),
+            len(ocr_triggered_page_numbers),
+        ),
+        "ocr_triggered_page_numbers": ocr_triggered_page_numbers,
+        "indexed_chunks": _to_int(meta.get("indexed_chunks"), _to_int(meta.get("chunk_count"), 0)),
+        "avg_context_tokens": (
+            _to_float(meta.get("avg_context_tokens"))
+            if meta.get("avg_context_tokens") is not None
+            else None
+        ),
+        "context_query_count": _to_int(meta.get("context_query_count"), 0),
+        "text_fallback_used": bool(meta.get("text_fallback_used")),
         "pages": [],
         "baidu_ocr_url": None,
         "baidu_ocr_token": None,
@@ -511,15 +781,15 @@ async def enqueue_ocr_job(
     await start_ocr_worker()
 
     if not ensure_document_loaded(doc_id):
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
 
     doc = documents.get(doc_id)
     if doc is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
 
     file_path = doc.get("file_path")
     if not file_path or not os.path.exists(file_path):
-        raise HTTPException(status_code=400, detail="该文档未保存 PDF，无法进行 OCR")
+        raise HTTPException(status_code=400, detail="该文档未保存 PDF，无法执行 OCR")
 
     total_pages = int(doc.get("total_pages") or 0)
     requested = _sorted_unique_pages(pages)
@@ -551,7 +821,7 @@ async def enqueue_ocr_job(
             doc_id,
             stage="ocr",
             current=0,
-            message=f"已加入后台 OCR 队列（{len(queued_pages)} 页）",
+            message=f"已加入 OCR 队列：{len(queued_pages)} 页",
         )
     return queued_pages
 
@@ -590,7 +860,7 @@ async def run_ocr_worker() -> None:
                     doc_id,
                     stage="ocr",
                     current=int((idx - 1) / max(total, 1) * 100),
-                    message=f"后台识别中（{idx}/{total}）...",
+                    message=f"Background OCR in progress ({idx}/{total})...",
                 )
                 try:
                     await recognize_document_page(doc_id, page_num, api_key=job.api_key)
@@ -654,6 +924,277 @@ async def stop_ocr_worker() -> None:
         ocr_worker_task = None
 
 
+def _set_audit_progress(
+    *,
+    job_id: str,
+    doc_id: str,
+    stage: str,
+    current: int,
+    total: int,
+    message: str,
+    status: str = "running",
+) -> None:
+    total = max(1, int(total))
+    current = max(0, min(int(current), total))
+    audit_progress[job_id] = {
+        "job_id": job_id,
+        "doc_id": doc_id,
+        "stage": stage,
+        "current": current,
+        "total": total,
+        "status": status,
+        "message": message,
+        "updated_at": _now_iso_utc(),
+    }
+
+
+def _build_page_image_inputs(file_path: str, pages: List[int]) -> List[PageImageInput]:
+    inputs: List[PageImageInput] = []
+    with fitz.open(file_path) as pdf_doc:
+        total = len(pdf_doc)
+        for page_num in pages:
+            if page_num < 1 or page_num > total:
+                continue
+            page = pdf_doc[page_num - 1]
+            image_base64 = render_page_to_image(page)
+            inputs.append(
+                PageImageInput(
+                    page=page_num,
+                    image_base64=image_base64,
+                    width=float(page.rect.width),
+                    height=float(page.rect.height),
+                )
+            )
+    return inputs
+
+
+async def enqueue_audit_job(doc_id: str, request: MultimodalAuditJobRequest, allowed_pages: List[int]) -> Dict[str, Any]:
+    if not ENABLE_MULTIMODAL_AUDIT:
+        raise HTTPException(status_code=503, detail="Multimodal audit is disabled by configuration.")
+
+    await start_audit_worker()
+
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc = documents.get(doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    file_path = doc.get("file_path")
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=400, detail="PDF is unavailable for multimodal audit.")
+
+    total_pages = int(doc.get("total_pages") or 0)
+    if total_pages <= 0:
+        raise HTTPException(status_code=400, detail="Document has no pages.")
+
+    requested_pages = _sorted_unique_pages(allowed_pages or [])
+    target_pages = requested_pages or list(range(1, total_pages + 1))
+    target_pages = [p for p in target_pages if 1 <= p <= total_pages]
+    if not target_pages:
+        raise HTTPException(status_code=400, detail="No valid pages selected for multimodal audit.")
+
+    max_pages = int(os.getenv("MULTIMODAL_AUDIT_MAX_PAGES", "120") or "120")
+    if len(target_pages) > max_pages:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Selected pages exceed limit ({len(target_pages)} > {max_pages}). Please narrow allowed_pages.",
+        )
+
+    job_id = f"audit_{uuid.uuid4().hex[:12]}"
+    created_at = _now_iso_utc()
+    sanitized_request = request.model_copy(update={"api_key": None})
+
+    audit_jobs[job_id] = {
+        "job_id": job_id,
+        "doc_id": doc_id,
+        "status": "queued",
+        "created_at": created_at,
+        "finished_at": None,
+        "request": sanitized_request.model_dump(),
+        "allowed_pages": target_pages,
+        "result": None,
+        "error": None,
+    }
+    _set_audit_progress(
+        job_id=job_id,
+        doc_id=doc_id,
+        stage="queued",
+        current=0,
+        total=100,
+        message="Audit job queued.",
+        status="queued",
+    )
+
+    queue_lock = _get_audit_queue_lock()
+    async with queue_lock:
+        await audit_queue.put(
+            AuditQueueJob(
+                job_id=job_id,
+                doc_id=doc_id,
+                request=request,
+                allowed_pages=target_pages,
+            )
+        )
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "progress_url": f"/api/documents/{doc_id}/multimodal_audit/jobs/{job_id}/progress",
+        "result_url": f"/api/documents/{doc_id}/multimodal_audit/jobs/{job_id}",
+    }
+
+
+async def run_audit_worker() -> None:
+    while True:
+        job = await audit_queue.get()
+        try:
+            record = audit_jobs.get(job.job_id)
+            if not record:
+                continue
+
+            record["status"] = "running"
+            _set_audit_progress(
+                job_id=job.job_id,
+                doc_id=job.doc_id,
+                stage="preparing",
+                current=5,
+                total=100,
+                message="Preparing audit job...",
+                status="running",
+            )
+
+            if not ensure_document_loaded(job.doc_id):
+                raise RuntimeError("Document not found.")
+
+            doc = documents.get(job.doc_id)
+            if doc is None:
+                raise RuntimeError("Document not found.")
+            file_path = doc.get("file_path")
+            if not file_path or not os.path.exists(file_path):
+                raise RuntimeError("PDF is unavailable for multimodal audit.")
+
+            _set_audit_progress(
+                job_id=job.job_id,
+                doc_id=job.doc_id,
+                stage="rendering",
+                current=10,
+                total=100,
+                message="Rendering audit page images...",
+                status="running",
+            )
+            page_inputs = _build_page_image_inputs(file_path=file_path, pages=job.allowed_pages)
+            if not page_inputs:
+                raise RuntimeError("No page images were rendered for audit.")
+
+            async def on_service_progress(stage: str, current: int, total: int, message: str) -> None:
+                if stage == "vision_analyzing":
+                    base = 20
+                    span = 45
+                elif stage == "rag_calibrating":
+                    base = 70
+                    span = 25
+                else:
+                    base = 20
+                    span = 60
+                pct = base + int((max(0, current) / max(1, total)) * span)
+                _set_audit_progress(
+                    job_id=job.job_id,
+                    doc_id=job.doc_id,
+                    stage=stage,
+                    current=pct,
+                    total=100,
+                    message=message,
+                    status="running",
+                )
+
+            result = await multimodal_audit_service.run_audit(
+                doc_id=job.doc_id,
+                audit_type=job.request.audit_type,
+                page_images=page_inputs,
+                bidder_name=job.request.bidder_name,
+                custom_checks=job.request.custom_checks,
+                api_key=job.request.api_key,
+                model=job.request.model,
+                progress_callback=on_service_progress,
+            )
+
+            final_payload = {
+                "job_id": job.job_id,
+                "doc_id": job.doc_id,
+                "status": "completed",
+                "created_at": record.get("created_at") or _now_iso_utc(),
+                "finished_at": _now_iso_utc(),
+                "request": (record.get("request") or {}),
+                "allowed_pages": list(job.allowed_pages),
+                **(result or {}),
+            }
+            record.update(
+                {
+                    "status": "completed",
+                    "finished_at": final_payload["finished_at"],
+                    "result": final_payload,
+                    "error": None,
+                }
+            )
+            document_store.append_multimodal_audit(job.doc_id, jsonable_encoder(final_payload), max_items=20)
+
+            _set_audit_progress(
+                job_id=job.job_id,
+                doc_id=job.doc_id,
+                stage="completed",
+                current=100,
+                total=100,
+                message="Audit completed.",
+                status="completed",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Unexpected error in multimodal audit worker")
+            record = audit_jobs.get(job.job_id)
+            if record is not None:
+                record.update(
+                    {
+                        "status": "failed",
+                        "finished_at": _now_iso_utc(),
+                        "result": None,
+                        "error": str(exc),
+                    }
+                )
+            _set_audit_progress(
+                job_id=job.job_id,
+                doc_id=job.doc_id,
+                stage="failed",
+                current=100,
+                total=100,
+                message=f"Multimodal audit failed: {str(exc)}",
+                status="failed",
+            )
+        finally:
+            audit_queue.task_done()
+
+
+async def start_audit_worker() -> None:
+    global audit_worker_task
+    if audit_worker_task is None or audit_worker_task.done():
+        audit_worker_task = asyncio.create_task(run_audit_worker(), name="multimodal-audit-worker")
+
+
+async def stop_audit_worker() -> None:
+    global audit_worker_task
+    if audit_worker_task is None:
+        return
+    audit_worker_task.cancel()
+    try:
+        await audit_worker_task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        audit_worker_task = None
+
+
 async def _run_ocr(
     image_base64: str,
     page_num: int,
@@ -702,13 +1243,13 @@ def _extract_page_image_and_size(
         page_height = float(page.rect.height)
         image_base64 = cached_image_base64 or render_page_to_image(page)
     if not image_base64:
-        raise HTTPException(status_code=500, detail=f"无法为第 {page_num} 页生成OCR图像")
+        raise HTTPException(status_code=500, detail=f"无法为第 {page_num} 页生成 OCR 图像")
     return image_base64, page_width, page_height
 
 
 async def recognize_document_page(doc_id: str, page_num: int, api_key: Optional[str] = None) -> dict:
     if not ensure_document_loaded(doc_id):
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
 
     lock = _get_or_create_doc_lock(doc_id)
 
@@ -721,7 +1262,7 @@ async def recognize_document_page(doc_id: str, page_num: int, api_key: Optional[
     async with lock:
         doc = documents.get(doc_id)
         if doc is None:
-            raise HTTPException(status_code=404, detail="文档不存在")
+            raise HTTPException(status_code=404, detail="Document not found")
 
         total_pages = int(doc.get("total_pages") or 0)
         if page_num < 1 or page_num > total_pages:
@@ -735,7 +1276,7 @@ async def recognize_document_page(doc_id: str, page_num: int, api_key: Optional[
                 "chunks": [],
                 "status": "already_recognized",
                 "already_recognized": True,
-                "message": "页面已识别",
+                "message": "该页已识别",
             }
         if current_status == "processing":
             return {
@@ -743,12 +1284,12 @@ async def recognize_document_page(doc_id: str, page_num: int, api_key: Optional[
                 "chunks": [],
                 "status": "processing",
                 "already_recognized": False,
-                "message": "页面 OCR 正在进行中",
+                "message": "该页 OCR 正在进行中",
             }
 
         file_path = doc.get("file_path") or ""
         if not file_path or not os.path.exists(file_path):
-            raise HTTPException(status_code=400, detail="该文档未保存 PDF，无法进行 OCR")
+            raise HTTPException(status_code=400, detail="该文档未保存 PDF，无法执行 OCR")
 
         target_page = _get_target_page(doc, page_num)
         cached_image_base64 = getattr(target_page, "image_base64", None) if target_page else None
@@ -758,6 +1299,7 @@ async def recognize_document_page(doc_id: str, page_num: int, api_key: Optional[
 
         status_map[page_num] = "processing"
         doc["page_ocr_status"] = status_map
+        _mark_ocr_triggered(doc, page_num)
         _sync_ocr_sets(doc)
         _persist_doc_meta(doc_id, status="completed")
 
@@ -777,7 +1319,7 @@ async def recognize_document_page(doc_id: str, page_num: int, api_key: Optional[
             baidu_ocr_token=baidu_ocr_token,
         )
         if not chunks:
-            raise HTTPException(status_code=422, detail=f"第 {page_num} 页OCR结果为空")
+            raise HTTPException(status_code=422, detail=f"第 {page_num} 页 OCR 结果为空")
 
         _clear_page_ocr_chunks(doc_id, page_num)
         indexed_count = await rag_engine.index_ocr_result(
@@ -787,12 +1329,12 @@ async def recognize_document_page(doc_id: str, page_num: int, api_key: Optional[
             api_key=api_key,
         )
         if indexed_count <= 0:
-            raise HTTPException(status_code=422, detail=f"第 {page_num} 页未生成可索引文本")
+            raise HTTPException(status_code=422, detail=f"Page {page_num} has no indexable text")
 
         async with lock:
             doc = documents.get(doc_id)
             if doc is None:
-                raise HTTPException(status_code=404, detail="文档不存在")
+                raise HTTPException(status_code=404, detail="Document not found")
 
             status_map = _ensure_status_map(doc)
             status_map[page_num] = "recognized"
@@ -863,23 +1405,55 @@ async def process_document_async(
     baidu_ocr_token: Optional[str] = None,
     ocr_mode: str = "manual",
     keep_pdf: bool = KEEP_PDF,
+    source_format: str = "pdf",
+    converted_from: Optional[str] = None,
+    conversion_status: str = "ok",
+    conversion_ms: Optional[int] = None,
+    source_file_path: Optional[str] = None,
 ):
     del ocr_model, ocr_provider
 
+    source_format = source_format if source_format in ALLOWED_UPLOAD_FORMATS else "pdf"
     ocr_mode = _normalize_ocr_mode(ocr_mode)
-    # Manual selective OCR requires PDF to remain available.
+    if _is_word_source(source_format) and ocr_mode == "full":
+        logger.info("Force OCR mode to manual for Word upload doc_id=%s", doc_id)
+        ocr_mode = "manual"
+
     effective_keep_pdf = bool(keep_pdf or ocr_mode == "manual")
+    text_fallback_used = False
 
     try:
         document_progress[doc_id] = ProgressEvent(
             stage="extracting",
             current=0,
             total=100,
-            message="正在解析PDF...",
+            message="Extracting document...",
             document_id=doc_id,
         )
 
         pages, thumbnails = process_document(file_path)
+        quality = _compute_text_quality(pages)
+        if (
+            source_format == "docx"
+            and bool(quality.get("low_quality"))
+            and source_file_path
+            and os.path.exists(source_file_path)
+        ):
+            markdown_text, fallback_error = extract_markdown_with_markitdown(source_file_path)
+            if markdown_text:
+                text_fallback_used = _apply_docx_markdown_fallback(pages, markdown_text)
+                if text_fallback_used:
+                    quality = _compute_text_quality(pages)
+                    logger.info(
+                        "Applied markitdown fallback doc_id=%s readable_ratio=%.3f empty_ratio=%.3f chars=%s",
+                        doc_id,
+                        quality.get("readable_ratio", 0.0),
+                        quality.get("empty_ratio", 1.0),
+                        int(quality.get("char_count", 0.0)),
+                    )
+            elif fallback_error:
+                logger.warning("MarkItDown fallback unavailable for %s: %s", doc_id, fallback_error)
+
         total_pages = len(pages)
         ocr_required = get_ocr_required_pages(pages)
         required_set = set(ocr_required)
@@ -904,10 +1478,22 @@ async def process_document_async(
             "file_path": file_path,
             "keep_pdf": effective_keep_pdf,
             "chunk_count": 0,
+            "indexed_chunks": 0,
+            "ocr_triggered_pages": 0,
+            "ocr_triggered_page_numbers": [],
+            "conversion_fail_count": 1 if conversion_status == "failed" else 0,
+            "avg_context_tokens": None,
+            "context_query_count": 0,
             "pages": pages,
             "baidu_ocr_url": baidu_ocr_url,
             "baidu_ocr_token": baidu_ocr_token,
+            "source_format": source_format,
+            "converted_from": converted_from,
+            "conversion_status": conversion_status,
+            "conversion_ms": conversion_ms,
+            "text_fallback_used": text_fallback_used,
         }
+        _update_doc_metrics(doc)
         _sync_ocr_sets(doc)
         documents[doc_id] = doc
         _get_or_create_doc_lock(doc_id)
@@ -927,8 +1513,19 @@ async def process_document_async(
                 "ocr_mode": ocr_mode,
                 "thumbnails": list(thumbnails),
                 "chunk_count": 0,
+                "indexed_chunks": 0,
                 "keep_pdf": effective_keep_pdf,
                 "pdf_path": file_path if effective_keep_pdf else None,
+                "source_format": source_format,
+                "converted_from": converted_from,
+                "conversion_status": conversion_status,
+                "conversion_ms": conversion_ms,
+                "conversion_fail_count": 1 if conversion_status == "failed" else 0,
+                "ocr_triggered_pages": 0,
+                "ocr_triggered_page_numbers": [],
+                "avg_context_tokens": None,
+                "context_query_count": 0,
+                "text_fallback_used": text_fallback_used,
             }
         )
 
@@ -936,11 +1533,12 @@ async def process_document_async(
             stage="embedding",
             current=40,
             total=100,
-            message="正在建立向量索引...",
+            message="Building vector index...",
             document_id=doc_id,
         )
         native_chunk_count = await rag_engine.index_document(doc_id, pages, api_key)
         doc["chunk_count"] = int(native_chunk_count)
+        doc["indexed_chunks"] = int(native_chunk_count)
         _persist_doc_meta(doc_id, status="processing")
 
         if ocr_mode == "full":
@@ -951,7 +1549,7 @@ async def process_document_async(
                     doc_id,
                     stage="completed",
                     current=100,
-                    message=f"处理完成：已识别 {len(doc.get('recognized_pages') or [])}/{total_pages} 页",
+                    message=f"Completed with OCR recognized pages: {len(doc.get('recognized_pages') or [])}/{total_pages}",
                 )
                 if not effective_keep_pdf:
                     _cleanup_temp_pdf_if_needed(doc_id)
@@ -969,7 +1567,7 @@ async def process_document_async(
                     doc_id,
                     stage="completed",
                     current=100,
-                    message=f"处理完成：已识别 {len(doc.get('recognized_pages') or [])}/{total_pages} 页",
+                    message=f"Completed with OCR recognized pages: {len(doc.get('recognized_pages') or [])}/{total_pages}",
                 )
                 if not effective_keep_pdf:
                     _cleanup_temp_pdf_if_needed(doc_id)
@@ -980,7 +1578,7 @@ async def process_document_async(
                 doc_id,
                 stage="ocr",
                 current=45,
-                message=f"已加入后台 OCR 队列（{len(queued_pages)} 页）",
+                message=f"Queued OCR pages: {len(queued_pages)}",
             )
             return
 
@@ -989,7 +1587,7 @@ async def process_document_async(
             stage="completed",
             current=100,
             total=100,
-            message="文档已加载，可在网格视图选择页面进行 OCR。",
+            message="文档已就绪。",
             document_id=doc_id,
         )
 
@@ -1005,8 +1603,19 @@ async def process_document_async(
                     "filename": filename,
                     "created_at": created_at,
                     "status": "failed",
-                    "keep_pdf": bool(keep_pdf),
-                    "pdf_path": file_path if keep_pdf else None,
+                    "keep_pdf": bool(effective_keep_pdf),
+                    "pdf_path": file_path if effective_keep_pdf else None,
+                    "source_format": source_format,
+                    "converted_from": converted_from,
+                    "conversion_status": "failed",
+                    "conversion_ms": conversion_ms,
+                    "conversion_fail_count": 1,
+                    "ocr_triggered_pages": 0,
+                    "ocr_triggered_page_numbers": [],
+                    "indexed_chunks": 0,
+                    "avg_context_tokens": None,
+                    "context_query_count": 0,
+                    "text_fallback_used": text_fallback_used,
                 }
             )
         except Exception:
@@ -1018,7 +1627,12 @@ async def process_document_async(
             message=str(exc),
             document_id=doc_id,
         )
-
+    finally:
+        if source_file_path and os.path.exists(source_file_path):
+            try:
+                os.remove(source_file_path)
+            except Exception as exc:
+                logger.warning("Failed to remove temporary source file for %s: %s", doc_id, str(exc))
 
 @router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_document(
@@ -1031,10 +1645,18 @@ async def upload_document(
     baidu_ocr_token: Optional[str] = Form(None),
     ocr_mode: str = Form("manual"),
 ):
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="仅支持 PDF 文件")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+
+    source_format = _detect_source_format(file.filename)
+    if not source_format:
+        raise HTTPException(status_code=400, detail="仅支持 .pdf、.doc、.docx 文件")
 
     ocr_mode = _normalize_ocr_mode(ocr_mode)
+    if _is_word_source(source_format) and ocr_mode == "full":
+        # Default to manual OCR for Word uploads to reduce unnecessary OCR usage.
+        ocr_mode = "manual"
+
     content = await file.read()
     sha256 = hashlib.sha256(content).hexdigest()
 
@@ -1049,7 +1671,7 @@ async def upload_document(
                 stage="completed",
                 current=100,
                 total=100,
-                message="已完成（命中缓存）",
+                message="Completed (cache hit)",
                 document_id=doc_id,
             )
             return DocumentUploadResponse(
@@ -1059,17 +1681,72 @@ async def upload_document(
                 ocr_required_pages=list(doc.get("ocr_required_pages") or existing.get("ocr_required_pages") or []),
                 progress_url=f"/api/documents/{doc_id}/progress",
                 ocr_mode=doc.get("ocr_mode") or existing.get("ocr_mode") or ocr_mode,
+                source_format=(doc.get("source_format") or existing.get("source_format") or source_format),
             )
 
     doc_id = (existing.get("doc_id") if existing else None) or f"doc_{uuid.uuid4().hex[:12]}"
     created_at = (existing.get("created_at") if existing else None) or _now_iso_utc()
     effective_keep_pdf = bool(KEEP_PDF or ocr_mode == "manual")
+    converted_from: Optional[str] = source_format if _is_word_source(source_format) else None
+    conversion_status = "ok"
+    conversion_ms: Optional[int] = None
+    source_file_path: Optional[str] = None
 
     upload_dir = Path("uploads")
     upload_dir.mkdir(parents=True, exist_ok=True)
     file_path = str(upload_dir / f"{doc_id}.pdf")
-    with open(file_path, "wb") as handle:
-        handle.write(content)
+    if source_format == "pdf":
+        with open(file_path, "wb") as handle:
+            handle.write(content)
+    else:
+        source_dir = upload_dir / "source"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        source_file_path = str(source_dir / f"{doc_id}.{source_format}")
+        with open(source_file_path, "wb") as handle:
+            handle.write(content)
+        try:
+            converted = convert_to_pdf(source_file_path, file_path)
+            file_path = converted.output_pdf_path
+            conversion_status = "ok"
+            conversion_ms = int(converted.elapsed_ms)
+        except WordConversionError as exc:
+            try:
+                document_store.upsert_doc(
+                    {
+                        "doc_id": doc_id,
+                        "sha256": sha256,
+                        "filename": file.filename,
+                        "created_at": created_at,
+                        "status": "failed",
+                        "keep_pdf": False,
+                        "pdf_path": None,
+                        "source_format": source_format,
+                        "converted_from": converted_from,
+                        "conversion_status": "failed",
+                        "conversion_ms": conversion_ms,
+                        "conversion_fail_count": 1,
+                        "ocr_triggered_pages": 0,
+                        "ocr_triggered_page_numbers": [],
+                        "indexed_chunks": 0,
+                        "avg_context_tokens": None,
+                        "context_query_count": 0,
+                        "text_fallback_used": False,
+                    }
+                )
+            except Exception:
+                pass
+            if source_file_path and os.path.exists(source_file_path):
+                try:
+                    os.remove(source_file_path)
+                except Exception:
+                    pass
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+            logger.warning("Word conversion failed for %s: %s", file.filename, str(exc))
+            raise HTTPException(status_code=400, detail=f"Word 转 PDF 失败: {exc}") from exc
 
     document_store.upsert_doc(
         {
@@ -1082,6 +1759,19 @@ async def upload_document(
             "ocr_mode": ocr_mode,
             "keep_pdf": effective_keep_pdf,
             "pdf_path": file_path if effective_keep_pdf else None,
+            "source_format": source_format,
+            "converted_from": converted_from,
+            "conversion_status": conversion_status,
+            "conversion_ms": conversion_ms,
+            "conversion_fail_count": 1 if conversion_status == "failed" else 0,
+            "ocr_triggered_pages": 0,
+            "ocr_triggered_page_numbers": [],
+            "indexed_chunks": int(existing.get("indexed_chunks") or existing.get("chunk_count") or 0)
+            if existing
+            else 0,
+            "avg_context_tokens": existing.get("avg_context_tokens") if existing else None,
+            "context_query_count": int(existing.get("context_query_count") or 0) if existing else 0,
+            "text_fallback_used": False,
         }
     )
 
@@ -1089,7 +1779,7 @@ async def upload_document(
         stage="extracting",
         current=0,
         total=100,
-        message="开始处理...",
+        message="已接收上传，正在处理...",
         document_id=doc_id,
     )
     _get_or_create_doc_lock(doc_id)
@@ -1113,6 +1803,11 @@ async def upload_document(
         baidu_ocr_token,
         ocr_mode,
         effective_keep_pdf,
+        source_format,
+        converted_from,
+        conversion_status,
+        conversion_ms,
+        source_file_path,
     )
 
     return DocumentUploadResponse(
@@ -1122,6 +1817,7 @@ async def upload_document(
         ocr_required_pages=[],
         progress_url=f"/api/documents/{doc_id}/progress",
         ocr_mode=ocr_mode,
+        source_format=source_format,
     )
 
 
@@ -1132,7 +1828,7 @@ async def get_progress(doc_id: str):
             if doc_id not in document_progress:
                 yield {
                     "event": "error",
-                    "data": json.dumps({"message": "文档不存在"}),
+                    "data": json.dumps({"message": "Document not found"}),
                 }
                 break
 
@@ -1168,6 +1864,22 @@ async def get_history():
                 "keep_pdf": bool(meta.get("keep_pdf")),
                 "has_pdf": has_pdf,
                 "ocr_mode": meta.get("ocr_mode") or "manual",
+                "source_format": meta.get("source_format") or "pdf",
+                "converted_from": meta.get("converted_from"),
+                "conversion_status": meta.get("conversion_status") or "ok",
+                "conversion_ms": (
+                    int(meta.get("conversion_ms")) if meta.get("conversion_ms") is not None else None
+                ),
+                "conversion_fail_count": _to_int(meta.get("conversion_fail_count"), 0),
+                "ocr_triggered_pages": _to_int(meta.get("ocr_triggered_pages"), 0),
+                "indexed_chunks": _to_int(meta.get("indexed_chunks"), _to_int(meta.get("chunk_count"), 0)),
+                "avg_context_tokens": (
+                    _to_float(meta.get("avg_context_tokens"))
+                    if meta.get("avg_context_tokens") is not None
+                    else None
+                ),
+                "context_query_count": _to_int(meta.get("context_query_count"), 0),
+                "text_fallback_used": bool(meta.get("text_fallback_used")),
             }
         )
     return items
@@ -1189,13 +1901,13 @@ async def lookup_document(request: LookupRequest):
 @router.get("/{doc_id}")
 async def get_document(doc_id: str):
     if not ensure_document_loaded(doc_id):
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
 
     lock = _get_or_create_doc_lock(doc_id)
     async with lock:
         doc = documents.get(doc_id)
         if doc is None:
-            raise HTTPException(status_code=404, detail="文档不存在")
+            raise HTTPException(status_code=404, detail="Document not found")
         _ensure_doc_thumbnails(doc_id, doc)
         _sync_ocr_sets(doc)
         _persist_doc_meta(doc_id, status=(document_store.get_by_doc_id(doc_id) or {}).get("status", "completed"))
@@ -1210,33 +1922,49 @@ async def get_document(doc_id: str):
             "page_ocr_status": doc.get("page_ocr_status") or {},
             "ocr_mode": doc.get("ocr_mode") or "manual",
             "thumbnails": list(doc.get("thumbnails") or []),
+            "source_format": doc.get("source_format") or "pdf",
+            "converted_from": doc.get("converted_from"),
+            "conversion_status": doc.get("conversion_status") or "ok",
+            "conversion_ms": (
+                int(doc.get("conversion_ms")) if doc.get("conversion_ms") is not None else None
+            ),
+            "conversion_fail_count": _to_int(doc.get("conversion_fail_count"), 0),
+            "ocr_triggered_pages": _to_int(doc.get("ocr_triggered_pages"), 0),
+            "indexed_chunks": _to_int(doc.get("indexed_chunks"), _to_int(doc.get("chunk_count"), 0)),
+            "avg_context_tokens": (
+                _to_float(doc.get("avg_context_tokens"))
+                if doc.get("avg_context_tokens") is not None
+                else None
+            ),
+            "context_query_count": _to_int(doc.get("context_query_count"), 0),
+            "text_fallback_used": bool(doc.get("text_fallback_used")),
         }
 
 
 @router.get("/{doc_id}/pdf")
 async def get_document_pdf(doc_id: str):
     if not ensure_document_loaded(doc_id):
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
     path = _resolve_pdf_path(doc_id)
     if not path:
-        raise HTTPException(status_code=404, detail="该文档未保存 PDF")
+        raise HTTPException(status_code=404, detail="PDF is not stored for this document")
     return FileResponse(path, media_type="application/pdf", filename=f"{doc_id}.pdf")
 
 
 @router.head("/{doc_id}/pdf")
 async def head_document_pdf(doc_id: str):
     if not ensure_document_loaded(doc_id):
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
     path = _resolve_pdf_path(doc_id)
     if not path:
-        raise HTTPException(status_code=404, detail="该文档未保存 PDF")
+        raise HTTPException(status_code=404, detail="PDF is not stored for this document")
     return Response(status_code=200)
 
 
 @router.post("/{doc_id}/attach_pdf")
 async def attach_document_pdf(doc_id: str, file: UploadFile = File(...)):
     if not ensure_document_loaded(doc_id):
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="仅支持 PDF 文件")
 
@@ -1246,7 +1974,7 @@ async def attach_document_pdf(doc_id: str, file: UploadFile = File(...)):
     meta = document_store.get_by_doc_id(doc_id) or {}
     expected_sha = str(meta.get("sha256") or "").strip().lower()
     if expected_sha and expected_sha != sha256:
-        raise HTTPException(status_code=400, detail="所选 PDF 与记录不匹配（SHA256 不同）")
+        raise HTTPException(status_code=400, detail="Selected PDF does not match recorded hash")
 
     upload_dir = Path("uploads")
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -1295,10 +2023,15 @@ async def delete_document(doc_id: str):
     document_store.delete_doc(doc_id)
     document_store.delete_chat(doc_id)
     document_store.delete_compliance(doc_id)
+    document_store.delete_multimodal_audit(doc_id)
 
     documents.pop(doc_id, None)
     document_progress.pop(doc_id, None)
     document_locks.pop(doc_id, None)
+    for job_id, record in list(audit_jobs.items()):
+        if record.get("doc_id") == doc_id:
+            audit_jobs.pop(job_id, None)
+            audit_progress.pop(job_id, None)
 
     return {"status": "deleted"}
 
@@ -1311,15 +2044,15 @@ class RecognizeRequest(BaseModel):
 @router.post("/{doc_id}/recognize")
 async def recognize_pages(doc_id: str, request: RecognizeRequest):
     if not ensure_document_loaded(doc_id):
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
 
     doc = documents.get(doc_id)
     if doc is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
 
     file_path = doc.get("file_path")
     if not file_path or not os.path.exists(file_path):
-        raise HTTPException(status_code=400, detail="该文档未保存 PDF，无法进行 OCR")
+        raise HTTPException(status_code=400, detail="该文档未保存 PDF，无法执行 OCR")
 
     total_pages = int(doc.get("total_pages") or 0)
     requested = _sorted_unique_pages(request.pages)
@@ -1338,7 +2071,7 @@ async def recognize_pages(doc_id: str, request: RecognizeRequest):
             "status": "noop",
             "document_id": doc_id,
             "pages": [],
-            "message": "没有新增待识别页面",
+            "message": "No new pages to OCR",
         }
 
     return {
@@ -1346,14 +2079,14 @@ async def recognize_pages(doc_id: str, request: RecognizeRequest):
         "queued": True,
         "document_id": doc_id,
         "pages": queued_pages,
-        "message": f"已加入后台 OCR 队列：{len(queued_pages)} 页",
+        "message": f"已加入 OCR 队列：{len(queued_pages)} 页",
     }
 
 
 @router.post("/{doc_id}/ocr/cancel")
 async def cancel_doc_ocr(doc_id: str):
     if not ensure_document_loaded(doc_id):
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
 
     queue_lock = _get_ocr_queue_lock()
     async with queue_lock:
@@ -1365,7 +2098,7 @@ async def cancel_doc_ocr(doc_id: str):
         doc_id,
         stage="completed",
         current=100,
-        message="OCR 任务取消中...",
+        message="已请求取消 OCR...",
     )
 
     return {
@@ -1373,6 +2106,94 @@ async def cancel_doc_ocr(doc_id: str):
         "document_id": doc_id,
         "pending_pages": pending,
     }
+
+
+@router.post("/{doc_id}/multimodal_audit/jobs", response_model=MultimodalAuditJobResponse)
+async def create_multimodal_audit_job(doc_id: str, request: MultimodalAuditJobRequest):
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if request.audit_type in {"certificate", "personnel"} and not request.bidder_name.strip():
+        raise HTTPException(status_code=400, detail="bidder_name is required for certificate/personnel audit.")
+
+    doc = documents.get(doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    total_pages = int(doc.get("total_pages") or 0)
+    if total_pages <= 0:
+        raise HTTPException(status_code=400, detail="Document has no pages.")
+
+    allowed_pages = _sorted_unique_pages(request.allowed_pages)
+    if not allowed_pages:
+        allowed_pages = list(range(1, total_pages + 1))
+
+    payload = await enqueue_audit_job(doc_id=doc_id, request=request, allowed_pages=allowed_pages)
+    return MultimodalAuditJobResponse(**payload)
+
+
+@router.get("/{doc_id}/multimodal_audit/jobs/{job_id}/progress")
+async def get_multimodal_audit_progress(doc_id: str, job_id: str):
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    async def event_generator():
+        while True:
+            progress = audit_progress.get(job_id)
+            if progress is None:
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"message": "Multimodal audit job not found."}),
+                }
+                break
+            if progress.get("doc_id") != doc_id:
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"message": "Job does not belong to this document."}),
+                }
+                break
+
+            yield {"event": "progress", "data": json.dumps(progress)}
+            if progress.get("stage") in {"completed", "failed"}:
+                break
+            await asyncio.sleep(0.5)
+
+    return EventSourceResponse(event_generator())
+
+
+@router.get("/{doc_id}/multimodal_audit/jobs/{job_id}")
+async def get_multimodal_audit_job_result(doc_id: str, job_id: str):
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    record = audit_jobs.get(job_id)
+    if record and record.get("doc_id") == doc_id:
+        result = record.get("result")
+        if result:
+            return result
+        return {
+            "job_id": job_id,
+            "doc_id": doc_id,
+            "status": record.get("status"),
+            "error": record.get("error"),
+            "created_at": record.get("created_at"),
+            "finished_at": record.get("finished_at"),
+        }
+
+    history = document_store.load_multimodal_audit(doc_id) or {}
+    jobs = history.get("jobs") if isinstance(history, dict) else []
+    if isinstance(jobs, list):
+        for item in jobs:
+            if isinstance(item, dict) and item.get("job_id") == job_id:
+                return item
+    raise HTTPException(status_code=404, detail="Multimodal audit job not found")
+
+
+@router.get("/{doc_id}/multimodal_audit/history")
+async def get_multimodal_audit_history(doc_id: str):
+    if not ensure_document_loaded(doc_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    data = document_store.load_multimodal_audit(doc_id) or {"version": 1, "doc_id": doc_id, "jobs": []}
+    return data
 
 
 class ComplianceRequest(BaseModel):
@@ -1386,12 +2207,12 @@ async def check_compliance(doc_id: str, request: ComplianceRequest):
     from app.services.compliance_service import compliance_service
 
     if not ensure_document_loaded(doc_id):
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
 
     if request.allowed_pages is None:
         doc = documents.get(doc_id)
         if not doc:
-            raise HTTPException(status_code=404, detail="文档不存在")
+            raise HTTPException(status_code=404, detail="Document not found")
         allowed_pages = get_consistent_recognized_pages(doc)
     else:
         allowed_pages = _sorted_unique_pages(request.allowed_pages)
@@ -1420,9 +2241,10 @@ async def check_compliance(doc_id: str, request: ComplianceRequest):
 @router.get("/{doc_id}/compliance_history")
 async def get_compliance_history(doc_id: str):
     if not ensure_document_loaded(doc_id):
-        raise HTTPException(status_code=404, detail="文档不存在")
+        raise HTTPException(status_code=404, detail="Document not found")
     data = document_store.load_compliance(doc_id)
     if not data:
-        raise HTTPException(status_code=404, detail="暂无合规检查历史")
+        raise HTTPException(status_code=404, detail="No compliance history")
     return data
+
 

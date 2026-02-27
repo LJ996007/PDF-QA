@@ -1,6 +1,13 @@
 import { useCallback } from 'react';
 import { useDocumentStore } from '../stores/documentStore';
-import type { ChatMessage, ComplianceItem, TextChunk } from '../stores/documentStore';
+import type {
+    AuditType,
+    ChatMessage,
+    ComplianceItem,
+    MultimodalAuditItem,
+    MultimodalAuditSummary,
+    TextChunk,
+} from '../stores/documentStore';
 
 export interface ChatStreamEvent {
     type: 'thinking' | 'references' | 'content' | 'done' | 'error';
@@ -32,7 +39,80 @@ export interface HistoryDocumentItem {
     sha256: string;
     status: string;
     has_pdf?: boolean;
+    source_format?: 'pdf' | 'doc' | 'docx';
+    converted_from?: 'doc' | 'docx' | null;
+    conversion_status?: 'pending' | 'ok' | 'failed' | null;
+    conversion_ms?: number | null;
+    conversion_fail_count?: number;
+    ocr_triggered_pages?: number;
+    indexed_chunks?: number;
+    avg_context_tokens?: number | null;
+    context_query_count?: number;
+    text_fallback_used?: boolean;
 }
+
+export interface MultimodalAuditJobCreateRequest {
+    audit_type: AuditType;
+    bidder_name: string;
+    allowed_pages: number[];
+    custom_checks: string[];
+    api_key?: string;
+    model?: string;
+}
+
+export interface MultimodalAuditJobCreateResponse {
+    job_id: string;
+    status: 'queued' | 'running' | 'completed' | 'failed';
+    progress_url: string;
+    result_url: string;
+}
+
+export interface MultimodalAuditProgressEvent {
+    job_id: string;
+    doc_id: string;
+    stage: string;
+    status: 'queued' | 'running' | 'completed' | 'failed';
+    current: number;
+    total: number;
+    message?: string;
+}
+
+export interface MultimodalAuditJobResult {
+    jobId: string;
+    status: 'queued' | 'running' | 'completed' | 'failed';
+    generatedAt: string;
+    auditType: AuditType;
+    items: MultimodalAuditItem[];
+    summary: MultimodalAuditSummary;
+}
+
+const mapAuditReferenceToChunk = (docId: string, ref: any, index: number): TextChunk => {
+    const page = Number(ref?.page || ref?.bbox?.page || 1);
+    const refId = String(ref?.ref_id || ref?.refId || `ref-${index + 1}`);
+    const bbox = ref?.bbox || { page, x: 0, y: 0, w: 100, h: 20 };
+    return {
+        id: `${docId}_${refId}_${index + 1}`,
+        refId,
+        content: String(ref?.evidence_text || ref?.content || ''),
+        page,
+        bbox,
+        source: ref?.source === 'ocr' ? 'ocr' : 'native',
+    };
+};
+
+const mapAuditItem = (docId: string, item: any, idx: number): MultimodalAuditItem => {
+    const refsRaw = Array.isArray(item?.references) ? item.references : [];
+    return {
+        checkKey: String(item?.check_key || item?.checkKey || `check_${idx + 1}`),
+        checkTitle: String(item?.check_title || item?.checkTitle || `检查项 ${idx + 1}`),
+        status: ['pass', 'fail', 'needs_review', 'error'].includes(String(item?.status))
+            ? (item.status as MultimodalAuditItem['status'])
+            : 'needs_review',
+        reason: String(item?.reason || ''),
+        confidence: Number(item?.confidence || 0),
+        references: refsRaw.map((ref: any, refIdx: number) => mapAuditReferenceToChunk(docId, ref, refIdx)),
+    };
+};
 
 export function useVectorSearch() {
     const {
@@ -52,7 +132,7 @@ export function useVectorSearch() {
     const askQuestion = useCallback(
         async (question: string, opts?: { useContext?: boolean }): Promise<void> => {
             if (!currentDocument) {
-                throw new Error('没有打开的文档');
+                throw new Error('未打开任何文档');
             }
 
             const useContext = opts?.useContext !== false;
@@ -107,7 +187,7 @@ export function useVectorSearch() {
 
                 const reader = response.body?.getReader();
                 if (!reader) {
-                    throw new Error('无法读取响应');
+                    throw new Error('无法读取响应流');
                 }
 
                 const decoder = new TextDecoder();
@@ -253,11 +333,11 @@ export function useVectorSearch() {
                     body: JSON.stringify({ sha256 }),
                 });
                 if (!response.ok) {
-                    throw new Error('lookup failed');
+                    throw new Error('查重失败');
                 }
                 return await response.json();
             } catch (error) {
-                console.error('lookup错误:', error);
+                console.error('查重错误:', error);
                 return { exists: false };
             }
         },
@@ -268,12 +348,12 @@ export function useVectorSearch() {
         try {
             const response = await fetch(`${API_BASE}/documents/history`);
             if (!response.ok) {
-                throw new Error('history failed');
+                throw new Error('历史记录加载失败');
             }
             const data = await response.json();
             return Array.isArray(data) ? data : [];
         } catch (error) {
-            console.error('history错误:', error);
+            console.error('历史记录错误:', error);
             return [];
         }
     }, [API_BASE]);
@@ -284,7 +364,7 @@ export function useVectorSearch() {
                 const resp = await fetch(`${API_BASE}/documents/${docId}`, { method: 'DELETE' });
                 return resp.ok;
             } catch (e) {
-                console.error('deleteDocument错误:', e);
+                console.error('删除文档错误:', e);
                 return false;
             }
         },
@@ -302,7 +382,7 @@ export function useVectorSearch() {
                 });
                 return resp.ok;
             } catch (e) {
-                console.error('attachPdf错误:', e);
+                console.error('补传 PDF 错误:', e);
                 return false;
             }
         },
@@ -323,7 +403,7 @@ export function useVectorSearch() {
                 }
                 return await resp.json();
             } catch (e) {
-                console.error('recognizePages错误:', e);
+                console.error('识别页面错误:', e);
                 return null;
             }
         },
@@ -338,7 +418,7 @@ export function useVectorSearch() {
                 });
                 return resp.ok;
             } catch (e) {
-                console.error('cancelOcr错误:', e);
+                console.error('取消 OCR 错误:', e);
                 return false;
             }
         },
@@ -350,7 +430,7 @@ export function useVectorSearch() {
             try {
                 const resp = await fetch(`${API_BASE}/documents/${docId}/chat_history`);
                 if (!resp.ok) {
-                    throw new Error('获取聊天历史失败');
+                    throw new Error('获取对话历史失败');
                 }
                 const data = await resp.json();
                 const raw = Array.isArray(data?.messages) ? data.messages : [];
@@ -384,7 +464,7 @@ export function useVectorSearch() {
                     } as ChatMessage;
                 });
             } catch (e) {
-                console.error('getChatHistory错误:', e);
+                console.error('获取对话历史错误:', e);
                 return [];
             }
         },
@@ -438,7 +518,129 @@ export function useVectorSearch() {
 
                 return { requirementsText: reqs.join('\n'), results: mapped, markdown };
             } catch (e) {
-                console.error('getComplianceHistory错误:', e);
+                console.error('获取合规检查历史错误:', e);
+                return null;
+            }
+        },
+        [API_BASE]
+    );
+
+    const createMultimodalAuditJob = useCallback(
+        async (docId: string, payload: MultimodalAuditJobCreateRequest): Promise<MultimodalAuditJobCreateResponse | null> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}/multimodal_audit/jobs`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!resp.ok) {
+                    const text = await resp.text();
+                    throw new Error(text || '创建专项审查任务失败');
+                }
+                return await resp.json();
+            } catch (e) {
+                console.error('创建专项审查任务错误:', e);
+                return null;
+            }
+        },
+        [API_BASE]
+    );
+
+    const watchMultimodalAuditProgress = useCallback(
+        (docId: string, jobId: string, onProgress: (progress: MultimodalAuditProgressEvent) => void): (() => void) => {
+            const eventSource = new EventSource(`${API_BASE}/documents/${docId}/multimodal_audit/jobs/${jobId}/progress`);
+
+            eventSource.addEventListener('progress', (event) => {
+                try {
+                    const data = JSON.parse((event as MessageEvent).data) as MultimodalAuditProgressEvent;
+                    onProgress(data);
+                    if (data.stage === 'completed' || data.stage === 'failed') {
+                        eventSource.close();
+                    }
+                } catch {
+                    // ignore malformed event
+                }
+            });
+
+            eventSource.onerror = () => {
+                eventSource.close();
+            };
+
+            return () => eventSource.close();
+        },
+        [API_BASE]
+    );
+
+    const getMultimodalAuditJobResult = useCallback(
+        async (docId: string, jobId: string): Promise<MultimodalAuditJobResult | null> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}/multimodal_audit/jobs/${jobId}`);
+                if (!resp.ok) throw new Error('获取专项审查结果失败');
+                const data = await resp.json();
+                const itemsRaw = Array.isArray(data?.items) ? data.items : [];
+                const mappedItems = itemsRaw.map((item: any, idx: number) => mapAuditItem(docId, item, idx));
+
+                const summaryRaw = data?.summary || {};
+                const summary: MultimodalAuditSummary = {
+                    pass: Number(summaryRaw.pass || 0),
+                    fail: Number(summaryRaw.fail || 0),
+                    needs_review: Number(summaryRaw.needs_review || 0),
+                    error: Number(summaryRaw.error || 0),
+                    total: Number(summaryRaw.total || mappedItems.length),
+                };
+
+                return {
+                    jobId: String(data?.job_id || jobId),
+                    status: ['queued', 'running', 'completed', 'failed'].includes(String(data?.status))
+                        ? (data.status as MultimodalAuditJobResult['status'])
+                        : 'running',
+                    generatedAt: String(data?.generated_at || ''),
+                    auditType: (data?.audit_type || 'contract') as AuditType,
+                    items: mappedItems,
+                    summary,
+                };
+            } catch (e) {
+                console.error('获取专项审查结果错误:', e);
+                return null;
+            }
+        },
+        [API_BASE]
+    );
+
+    const getMultimodalAuditHistory = useCallback(
+        async (docId: string): Promise<MultimodalAuditJobResult | null> => {
+            try {
+                const resp = await fetch(`${API_BASE}/documents/${docId}/multimodal_audit/history`);
+                if (!resp.ok) {
+                    if (resp.status === 404) return null;
+                    throw new Error('获取专项审查历史失败');
+                }
+                const data = await resp.json();
+                const jobs = Array.isArray(data?.jobs) ? data.jobs : [];
+                if (jobs.length === 0) return null;
+                const latest = jobs[0];
+                const itemsRaw = Array.isArray(latest?.items) ? latest.items : [];
+                const mappedItems = itemsRaw.map((item: any, idx: number) => mapAuditItem(docId, item, idx));
+                const summaryRaw = latest?.summary || {};
+                const summary: MultimodalAuditSummary = {
+                    pass: Number(summaryRaw.pass || 0),
+                    fail: Number(summaryRaw.fail || 0),
+                    needs_review: Number(summaryRaw.needs_review || 0),
+                    error: Number(summaryRaw.error || 0),
+                    total: Number(summaryRaw.total || mappedItems.length),
+                };
+                return {
+                    jobId: String(latest?.job_id || ''),
+                    status: ['queued', 'running', 'completed', 'failed'].includes(String(latest?.status))
+                        ? (latest.status as MultimodalAuditJobResult['status'])
+                        : 'completed',
+                    generatedAt: String(latest?.generated_at || latest?.finished_at || ''),
+                    auditType: (latest?.audit_type || 'contract') as AuditType,
+                    items: mappedItems,
+                    summary,
+                };
+            } catch (e) {
+                console.error('获取专项审查历史错误:', e);
                 return null;
             }
         },
@@ -484,6 +686,10 @@ export function useVectorSearch() {
         cancelOcr,
         getChatHistory,
         getComplianceHistory,
+        createMultimodalAuditJob,
+        watchMultimodalAuditProgress,
+        getMultimodalAuditJobResult,
+        getMultimodalAuditHistory,
         watchProgress,
     };
 }

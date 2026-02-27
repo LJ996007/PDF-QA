@@ -1,38 +1,82 @@
-"""
-RAG对话路由
-"""
+"""RAG 对话路由。"""
+
+from __future__ import annotations
+
 import json
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from app.models.schemas import ChatRequest, TextChunk
-from app.services.rag_engine import rag_engine
-from app.services.llm_router import llm_router
 from app.routers.documents import documents, ensure_document_loaded
 from app.services.document_store import document_store
-
+from app.services.llm_router import llm_router
+from app.services.rag_engine import rag_engine
 
 router = APIRouter()
 
 
+def _estimate_context_tokens(chunks: list[TextChunk]) -> int:
+    # Lightweight estimate to keep metrics cheap: ~4 chars per token.
+    total_chars = sum(len((chunk.content or "").strip()) for chunk in chunks)
+    if total_chars <= 0:
+        return 0
+    return max(1, total_chars // 4)
+
+
+def _record_context_metrics(doc_id: str, context_tokens: int) -> None:
+    if context_tokens <= 0:
+        return
+
+    meta = document_store.get_by_doc_id(doc_id) or {}
+    prev_count = 0
+    try:
+        prev_count = int(meta.get("context_query_count") or 0)
+    except (TypeError, ValueError):
+        prev_count = 0
+
+    prev_avg_raw = meta.get("avg_context_tokens")
+    try:
+        prev_avg = float(prev_avg_raw) if prev_avg_raw is not None else 0.0
+    except (TypeError, ValueError):
+        prev_avg = 0.0
+
+    new_count = prev_count + 1
+    new_avg = ((prev_avg * prev_count) + float(context_tokens)) / float(new_count)
+
+    try:
+        document_store.upsert_doc(
+            {
+                "doc_id": doc_id,
+                "avg_context_tokens": round(new_avg, 2),
+                "context_query_count": new_count,
+            }
+        )
+    except Exception as exc:
+        print(f"[METRICS] Failed to persist context metrics for {doc_id}: {exc}")
+
+    doc = documents.get(doc_id)
+    if isinstance(doc, dict):
+        doc["avg_context_tokens"] = round(new_avg, 2)
+        doc["context_query_count"] = new_count
+
+
 @router.post("/chat")
 async def chat(request: ChatRequest):
-    """
-    RAG对话接口（SSE流式返回）
-    """
+    """流式返回带引用的 RAG 答案。"""
     doc_id = request.document_id
-    
+
     if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
-    
-    # 1. 检索相关片段（增加到10个以覆盖更多相关内容）
+
     chunks = await rag_engine.retrieve(
         query=request.question,
         doc_id=doc_id,
         top_k=10,
-        api_key=request.zhipu_api_key
+        api_key=request.zhipu_api_key,
     )
 
     refs_data = [
@@ -45,55 +89,47 @@ async def chat(request: ChatRequest):
         }
         for chunk in chunks
     ]
-    
+    _record_context_metrics(doc_id, _estimate_context_tokens(chunks))
+
     async def event_generator():
-        # 发送thinking状态
         yield {
             "event": "message",
-            "data": json.dumps({
-                "type": "thinking",
-                "content": f"正在检索相关内容...找到 {len(chunks)} 个相关片段"
-            })
-        }
-        
-        # 发送检索到的引用信息
-        yield {
-            "event": "message",
-            "data": json.dumps({
-                "type": "references",
-                "refs": refs_data
-            })
+            "data": json.dumps(
+                {
+                    "type": "thinking",
+                    "content": f"正在检索相关内容... 已找到 {len(chunks)} 个片段。",
+                }
+            ),
         }
 
-        # If we cannot retrieve any chunk, do not call the LLM with an empty context.
-        # This avoids hallucinated citations and gives the user actionable next steps.
+        yield {
+            "event": "message",
+            "data": json.dumps({"type": "references", "refs": refs_data}),
+        }
+
+        # 检索不到内容时，不调用 LLM，避免空上下文幻觉。
         if not chunks:
             doc = documents.get(doc_id, {})
             ocr_pages = doc.get("ocr_required_pages") or []
 
-            hint = "未从文档索引中检索到任何内容。"
+            hint = "未从该文档索引中检索到可用内容。"
             if ocr_pages:
-                hint += f" 该文档可能是扫描件（{len(ocr_pages)} 页需要 OCR）。请在设置中配置可用的 OCR 服务（百度 PP-OCR 的 API 地址/Token），或检查 OCR 是否调用成功。"
+                hint += (
+                    f" 该文件可能是扫描件，仍有 {len(ocr_pages)} 页需要 OCR。"
+                    " 请先配置 OCR 服务并重新识别。"
+                )
             else:
-                hint += " 请确认文档是否已成功解析并建立索引。"
+                hint += " 请确认文档解析和索引流程已成功完成。"
 
             yield {
                 "event": "message",
-                "data": json.dumps({
-                    "type": "content",
-                    "text": hint,
-                    "active_refs": []
-                })
+                "data": json.dumps({"type": "content", "text": hint, "active_refs": []}),
             }
             yield {
                 "event": "message",
-                "data": json.dumps({
-                    "type": "done",
-                    "final_refs": []
-                })
+                "data": json.dumps({"type": "done", "final_refs": []}),
             }
 
-            # Persist this Q/A hint so it appears in chat history.
             try:
                 ts = datetime.now(timezone.utc).isoformat()
                 user_msg = {
@@ -110,39 +146,38 @@ async def chat(request: ChatRequest):
                     "references": [],
                 }
                 document_store.append_chat(doc_id, user_msg, assistant_msg)
-            except Exception as e:
-                print(f"[CHAT_STORE] Failed to persist hint: {e}")
+            except Exception as exc:
+                print(f"[CHAT_STORE] Failed to persist hint: {exc}")
 
             return
-        
-        # 2. 流式生成回答
+
         all_refs = set()
         assistant_text = ""
-        
+
         async for chunk in llm_router.chat_stream(
             question=request.question,
             chunks=chunks,
             history=request.history,
             zhipu_api_key=request.zhipu_api_key,
-            deepseek_api_key=request.deepseek_api_key
+            deepseek_api_key=request.deepseek_api_key,
         ):
             if chunk["type"] == "content":
                 assistant_text += chunk["content"]
-                # 收集所有引用
                 for ref in chunk.get("active_refs", []):
                     all_refs.add(ref)
-                
+
                 yield {
                     "event": "message",
-                    "data": json.dumps({
-                        "type": "content",
-                        "text": chunk["content"],
-                        "active_refs": chunk.get("active_refs", [])
-                    })
+                    "data": json.dumps(
+                        {
+                            "type": "content",
+                            "text": chunk["content"],
+                            "active_refs": chunk.get("active_refs", []),
+                        }
+                    ),
                 }
-            
+
             elif chunk["type"] == "done":
-                # Persist chat history on completion.
                 try:
                     ts = datetime.now(timezone.utc).isoformat()
                     user_msg = {
@@ -159,53 +194,46 @@ async def chat(request: ChatRequest):
                         "references": refs_data,
                     }
                     document_store.append_chat(doc_id, user_msg, assistant_msg)
-                except Exception as e:
-                    print(f"[CHAT_STORE] Failed to persist chat: {e}")
+                except Exception as exc:
+                    print(f"[CHAT_STORE] Failed to persist chat: {exc}")
 
                 yield {
                     "event": "message",
-                    "data": json.dumps({
-                        "type": "done",
-                        "final_refs": list(all_refs)
-                    })
+                    "data": json.dumps({"type": "done", "final_refs": list(all_refs)}),
                 }
-            
+
             elif chunk["type"] == "error":
                 yield {
                     "event": "message",
-                    "data": json.dumps({
-                        "type": "error",
-                        "content": chunk["content"]
-                    })
+                    "data": json.dumps({"type": "error", "content": chunk["content"]}),
                 }
-    
+
     return EventSourceResponse(event_generator())
 
 
 @router.get("/documents/{doc_id}/chat_history")
 async def get_chat_history(doc_id: str):
-    """Return persisted chat history for a document."""
+    """获取文档已持久化的聊天历史。"""
     if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
     return document_store.load_chat(doc_id)
 
 
 @router.get("/documents/{doc_id}/chunks")
-async def get_chunks(doc_id: str, page: int = None):
-    """获取文档的所有文本块（用于调试）"""
+async def get_chunks(doc_id: str, page: Optional[int] = None):
+    """获取索引片段（调试用）。"""
     if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
-    
-    # 使用空查询检索所有
+
     chunks = await rag_engine.retrieve(
         query="",
         doc_id=doc_id,
-        top_k=100
+        top_k=100,
     )
-    
+
     if page:
         chunks = [c for c in chunks if c.page_number == page]
-    
+
     return {
         "chunks": [
             {
@@ -213,7 +241,7 @@ async def get_chunks(doc_id: str, page: int = None):
                 "page": c.page_number,
                 "content": c.content,
                 "bbox": c.bbox.model_dump(),
-                "source": c.source_type
+                "source": c.source_type,
             }
             for c in chunks
         ]

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Pydantic data models.
 """
 
@@ -67,6 +67,7 @@ class DocumentUploadResponse(BaseModel):
     ocr_required_pages: List[int]
     progress_url: str
     ocr_mode: Literal["manual", "full"] = "manual"
+    source_format: Optional[Literal["pdf", "doc", "docx"]] = "pdf"
 
 
 class OCRRequest(BaseModel):
@@ -132,3 +133,54 @@ class ProgressEvent(BaseModel):
     total: int
     message: Optional[str] = None
     document_id: Optional[str] = None
+
+
+class MultimodalAuditReference(BaseModel):
+    """Reference for multimodal audit finding."""
+
+    ref_id: str
+    page: int
+    evidence_text: str
+    bbox: BoundingBox
+    source: Literal["rag_calibrated", "fallback_page", "vision"] = "rag_calibrated"
+
+
+class MultimodalAuditItem(BaseModel):
+    """One multimodal audit check result."""
+
+    check_key: str
+    check_title: str
+    status: Literal["pass", "fail", "needs_review", "error"]
+    reason: str
+    confidence: float = 0.0
+    references: List[MultimodalAuditReference] = Field(default_factory=list)
+
+
+class MultimodalAuditSummary(BaseModel):
+    """Summary counters for one audit run."""
+
+    total: int = 0
+    passed: int = 0
+    failed: int = 0
+    needs_review: int = 0
+    error: int = 0
+
+
+class MultimodalAuditJobRequest(BaseModel):
+    """Request payload for creating multimodal audit job."""
+
+    audit_type: Literal["contract", "certificate", "personnel"]
+    bidder_name: str = ""
+    allowed_pages: List[int] = Field(default_factory=list)
+    custom_checks: List[str] = Field(default_factory=list)
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+
+
+class MultimodalAuditJobResponse(BaseModel):
+    """Create-job response for multimodal audit."""
+
+    job_id: str
+    status: Literal["queued", "running", "completed", "failed"]
+    progress_url: str
+    result_url: str

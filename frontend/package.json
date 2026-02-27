@@ -7,10 +7,11 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "lint:mojibake": "python ../scripts/check_mojibake.py --targets src ../backend/app/routers ../backend/main.py",
+    "lint:mojibake": "python ../scripts/check_mojibake.py --targets src ../backend/main.py ../backend/app/routers ../backend/app/services/rag_engine.py ../CLAUDE.md",
+    "lint:ui-copy": "python ../scripts/check_ui_copy.py",
     "preview": "vite preview",
     "check:mojibake": "npm run check:mojibake:warn",
-    "check:mojibake:warn": "python ../scripts/check_mojibake.py --targets src ../backend/app/routers ../backend/main.py --warn-only"
+    "check:mojibake:warn": "python ../scripts/check_mojibake.py --targets src ../backend/main.py ../backend/app/routers ../backend/app/services/rag_engine.py ../CLAUDE.md --warn-only"
   },
   "dependencies": {
     "immer": "^11.1.3",

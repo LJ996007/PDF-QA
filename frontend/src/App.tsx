@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { PDFViewer } from './components/PDFViewer';
 import { ChatPanel } from './components/Chat';
 import { CompliancePanel } from './components/Compliance/CompliancePanel';
+import { MultimodalAuditPanel } from './components/Audit/MultimodalAuditPanel';
 import { Settings } from './components/Settings';
 import { useDocumentStore } from './stores/documentStore';
 import type { Document, PageOcrStatus, TabProgress } from './stores/documentStore';
@@ -23,6 +24,9 @@ const mapPageStatus = (
   return output;
 };
 
+const isPdfFilename = (name: string): boolean => name.toLowerCase().endsWith('.pdf');
+const isSupportedUploadFilename = (name: string): boolean => /\.(pdf|doc|docx)$/i.test(name);
+
 const mapBackendDocument = (doc: any, fallbackName = ''): Document => ({
   id: String(doc?.id || ''),
   name: String(doc?.name || fallbackName || doc?.id || '未命名文档'),
@@ -33,15 +37,25 @@ const mapBackendDocument = (doc: any, fallbackName = ''): Document => ({
   pageOcrStatus: mapPageStatus(doc?.page_ocr_status),
   ocrMode: doc?.ocr_mode === 'full' ? 'full' : 'manual',
   thumbnails: Array.isArray(doc?.thumbnails) ? doc.thumbnails : [],
+  sourceFormat: (doc?.source_format || 'pdf') as Document['sourceFormat'],
+  convertedFrom: (doc?.converted_from || null) as Document['convertedFrom'],
+  conversionStatus: (doc?.conversion_status || 'ok') as Document['conversionStatus'],
+  conversionMs: typeof doc?.conversion_ms === 'number' ? doc.conversion_ms : null,
+  conversionFailCount: typeof doc?.conversion_fail_count === 'number' ? doc.conversion_fail_count : 0,
+  ocrTriggeredPages: typeof doc?.ocr_triggered_pages === 'number' ? doc.ocr_triggered_pages : 0,
+  indexedChunks: typeof doc?.indexed_chunks === 'number' ? doc.indexed_chunks : 0,
+  avgContextTokens: typeof doc?.avg_context_tokens === 'number' ? doc.avg_context_tokens : null,
+  contextQueryCount: typeof doc?.context_query_count === 'number' ? doc.context_query_count : 0,
+  textFallbackUsed: Boolean(doc?.text_fallback_used),
 });
 
 const progressLabel = (progress: TabProgress | null): string => {
   if (!progress) return '';
   if (progress.stage === 'extracting') return '解析中';
-  if (progress.stage === 'embedding') return '建索引';
-  if (progress.stage === 'ocr') return 'OCR中';
+  if (progress.stage === 'embedding') return '索引中';
+  if (progress.stage === 'ocr') return 'OCR';
   if (progress.stage === 'failed') return '失败';
-  return '完成';
+  return '已完成';
 };
 
 type DocTabStatusKey =
@@ -80,15 +94,15 @@ const getDocTabStatus = (
   const totalTarget = Math.max(baseline, pending);
 
   if (totalTarget === 0) {
-    return { key: 'no-ocr', label: '无需OCR' };
+    return { key: 'no-ocr', label: '无需 OCR' };
   }
   if (pending === totalTarget) {
     return { key: 'unrecognized', label: '未识别' };
   }
   if (pending === 0) {
-    return { key: 'completed', label: '完成' };
+    return { key: 'completed', label: '已完成' };
   }
-  return { key: 'partial', label: '部分' };
+  return { key: 'partial', label: '部分完成' };
 };
 
 const getBackgroundOcrPages = (doc: Document): number[] => {
@@ -128,6 +142,7 @@ function App() {
     setTabPdfUrl,
     setTabMessages,
     setTabCompliance,
+    setTabAudit,
     setTabProgress,
     setRightPanelMode,
   } = useDocumentStore();
@@ -143,6 +158,7 @@ function App() {
     attachPdf,
     getChatHistory,
     getComplianceHistory,
+    getMultimodalAuditHistory,
     recognizePages,
     cancelOcr,
   } = useVectorSearch();
@@ -185,7 +201,7 @@ function App() {
       const items = await listHistory();
       setHistoryDocs(items);
     } catch (error) {
-      setHistoryError(error instanceof Error ? error.message : 'Failed to load history');
+      setHistoryError(error instanceof Error ? error.message : '加载历史记录失败');
     } finally {
       setHistoryLoading(false);
     }
@@ -206,6 +222,18 @@ function App() {
           if (latestDoc) {
             updateTabDocument(docId, mapBackendDocument(latestDoc));
           }
+          const tab = useDocumentStore.getState().tabsByDocId[docId];
+          if (!tab?.pdfUrl) {
+            const candidate = getPdfUrl(docId);
+            try {
+              const resp = await fetch(candidate, { method: 'HEAD' });
+              if (resp.ok) {
+                setTabPdfUrl(docId, candidate);
+              }
+            } catch {
+              // ignore
+            }
+          }
           await refreshHistory();
         })();
       }
@@ -215,7 +243,7 @@ function App() {
       unwatch();
       watchersRef.current.delete(docId);
     });
-  }, [watchProgress, setTabProgress, stopProgressWatch, getDocument, updateTabDocument, refreshHistory]);
+  }, [watchProgress, setTabProgress, stopProgressWatch, getDocument, updateTabDocument, getPdfUrl, setTabPdfUrl, refreshHistory]);
 
   useEffect(() => {
     void refreshHistory();
@@ -280,10 +308,11 @@ function App() {
       ensureProgressWatch(docId);
 
       void (async () => {
-        const [doc, history, compliance] = await Promise.all([
+        const [doc, history, compliance, auditHistory] = await Promise.all([
           getDocument(docId),
           getChatHistory(docId),
           getComplianceHistory(docId),
+          getMultimodalAuditHistory(docId),
         ]);
 
         if (doc) {
@@ -295,6 +324,23 @@ function App() {
             requirements: compliance.requirementsText,
             results: compliance.results,
             markdown: compliance.markdown,
+          });
+        }
+        if (auditHistory) {
+          setTabAudit(docId, {
+            lastJobId: auditHistory.jobId,
+            auditType: auditHistory.auditType,
+            items: auditHistory.items,
+            summary: auditHistory.summary,
+            generatedAt: auditHistory.generatedAt,
+            progress: {
+              jobId: auditHistory.jobId,
+              status: auditHistory.status,
+              stage: auditHistory.status,
+              current: 100,
+              total: 100,
+              message: '已加载审查历史。',
+            },
           });
         }
 
@@ -324,17 +370,19 @@ function App() {
     getDocument,
     getChatHistory,
     getComplianceHistory,
+    getMultimodalAuditHistory,
     updateTabDocument,
     setTabMessages,
     setTabCompliance,
+    setTabAudit,
     getPdfUrl,
     setTabPdfUrl,
   ]);
 
   const uploadOneFile = useCallback(async (file: File, ocrMode: 'manual' | 'full', options?: UploadOneOptions): Promise<boolean> => {
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
+    if (!isSupportedUploadFilename(file.name)) {
       if (!options?.silent) {
-        alert('请上传 PDF 文件');
+        alert('仅支持 .pdf、.doc、.docx 文件');
       }
       return false;
     }
@@ -344,13 +392,27 @@ function App() {
       const lookup = await lookupDocument(sha);
 
       if (lookup.exists && lookup.doc_id) {
-        const url = URL.createObjectURL(file);
+        let url: string | null = null;
+        if (isPdfFilename(file.name)) {
+          url = URL.createObjectURL(file);
+        } else {
+          const candidate = getPdfUrl(lookup.doc_id);
+          try {
+            const resp = await fetch(candidate, { method: 'HEAD' });
+            if (resp.ok) {
+              url = candidate;
+            }
+          } catch {
+            // ignore
+          }
+        }
         const doc = await getDocument(lookup.doc_id);
         if (doc) {
           openOrFocusTab(mapBackendDocument(doc, file.name), url);
-          const [history, compliance] = await Promise.all([
+          const [history, compliance, auditHistory] = await Promise.all([
             getChatHistory(lookup.doc_id),
             getComplianceHistory(lookup.doc_id),
+            getMultimodalAuditHistory(lookup.doc_id),
           ]);
           setTabMessages(lookup.doc_id, history);
           if (compliance) {
@@ -358,6 +420,23 @@ function App() {
               requirements: compliance.requirementsText,
               results: compliance.results,
               markdown: compliance.markdown,
+            });
+          }
+          if (auditHistory) {
+            setTabAudit(lookup.doc_id, {
+              lastJobId: auditHistory.jobId,
+              auditType: auditHistory.auditType,
+              items: auditHistory.items,
+              summary: auditHistory.summary,
+              generatedAt: auditHistory.generatedAt,
+              progress: {
+                jobId: auditHistory.jobId,
+                status: auditHistory.status,
+                stage: auditHistory.status,
+                current: 100,
+                total: 100,
+                message: '已加载审查历史。',
+              },
             });
           }
         }
@@ -371,7 +450,7 @@ function App() {
         throw new Error('上传失败');
       }
 
-      const url = URL.createObjectURL(file);
+      const url = isPdfFilename(file.name) ? URL.createObjectURL(file) : null;
       openOrFocusTab(
         {
           id: docId,
@@ -383,6 +462,20 @@ function App() {
           pageOcrStatus: {},
           ocrMode,
           thumbnails: [],
+          sourceFormat: file.name.toLowerCase().endsWith('.docx')
+            ? 'docx'
+            : file.name.toLowerCase().endsWith('.doc')
+              ? 'doc'
+              : 'pdf',
+          convertedFrom: file.name.toLowerCase().endsWith('.pdf') ? null : (file.name.toLowerCase().endsWith('.docx') ? 'docx' : 'doc'),
+          conversionStatus: file.name.toLowerCase().endsWith('.pdf') ? 'ok' : 'pending',
+          conversionMs: null,
+          conversionFailCount: 0,
+          ocrTriggeredPages: 0,
+          indexedChunks: 0,
+          avgContextTokens: null,
+          contextQueryCount: 0,
+          textFallbackUsed: false,
         },
         url
       );
@@ -398,7 +491,7 @@ function App() {
       return true;
     } catch (error) {
       if (!options?.silent) {
-        alert(`上传失败: ${error instanceof Error ? error.message : '未知错误'}`);
+        alert(`上传失败：${error instanceof Error ? error.message : '未知错误'}`);
       }
       return false;
     }
@@ -408,11 +501,14 @@ function App() {
     openOrFocusTab,
     getChatHistory,
     getComplianceHistory,
+    getMultimodalAuditHistory,
     setTabMessages,
     setTabCompliance,
+    setTabAudit,
     ensureProgressWatch,
     refreshHistory,
     uploadDocument,
+    getPdfUrl,
     setTabProgress,
   ]);
 
@@ -426,7 +522,7 @@ function App() {
 
     for (let i = 0; i < files.length; i += 1) {
       const file = files[i];
-      setBatchUploadHint(`正在上传 ${i + 1}/${files.length}: ${file.name}`);
+      setBatchUploadHint(`正在上传 ${i + 1}/${files.length}：${file.name}`);
       const ok = await uploadOneFile(file, 'manual', { silent: true });
       if (ok) {
         successCount += 1;
@@ -438,20 +534,20 @@ function App() {
     setBatchUploadHint(null);
 
     if (failedFiles.length === 0) {
-      alert(`批量上传完成：成功 ${successCount}/${files.length}`);
+      alert(`批量上传完成：${successCount}/${files.length}`);
       return;
     }
 
-    const preview = failedFiles.slice(0, 5).join('、');
-    const suffix = failedFiles.length > 5 ? ' 等' : '';
+    const preview = failedFiles.slice(0, 5).join(', ');
+    const suffix = failedFiles.length > 5 ? ' ...' : '';
     alert(
-      `批量上传完成：成功 ${successCount}/${files.length}，失败 ${failedFiles.length}。\n失败文件：${preview}${suffix}`
+      `批量上传完成：${successCount}/${files.length}，失败 ${failedFiles.length} 个\n失败文件：${preview}${suffix}`
     );
   }, [uploadOneFile]);
 
   const beginUploadChoice = useCallback((file: File) => {
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-      alert('请上传 PDF 文件');
+    if (!isSupportedUploadFilename(file.name)) {
+      alert('仅支持 .pdf、.doc、.docx 文件');
       return;
     }
     setPendingUploadFile(file);
@@ -490,23 +586,23 @@ function App() {
       return;
     }
 
-    const pdfFiles = source.filter((file) => file.name.toLowerCase().endsWith('.pdf'));
-    const ignoredCount = source.length - pdfFiles.length;
+    const acceptedFiles = source.filter((file) => isSupportedUploadFilename(file.name));
+    const ignoredCount = source.length - acceptedFiles.length;
 
     if (ignoredCount > 0) {
-      alert(`已忽略 ${ignoredCount} 个非 PDF 文件`);
+      alert(`已忽略 ${ignoredCount} 个不支持的文件`);
     }
 
-    if (pdfFiles.length === 0) {
+    if (acceptedFiles.length === 0) {
       return;
     }
 
-    if (pdfFiles.length === 1) {
-      beginUploadChoice(pdfFiles[0]);
+    if (acceptedFiles.length === 1) {
+      beginUploadChoice(acceptedFiles[0]);
       return;
     }
 
-    await uploadFilesSerial(pdfFiles);
+    await uploadFilesSerial(acceptedFiles);
   }, [beginUploadChoice, uploadFilesSerial]);
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -557,10 +653,11 @@ function App() {
     }
 
     try {
-      const [doc, history, compliance] = await Promise.all([
+      const [doc, history, compliance, auditHistory] = await Promise.all([
         getDocument(docId),
         getChatHistory(docId),
         getComplianceHistory(docId),
+        getMultimodalAuditHistory(docId),
       ]);
 
       if (doc) {
@@ -574,14 +671,31 @@ function App() {
           markdown: compliance.markdown,
         });
       }
+      if (auditHistory) {
+        setTabAudit(docId, {
+          lastJobId: auditHistory.jobId,
+          auditType: auditHistory.auditType,
+          items: auditHistory.items,
+          summary: auditHistory.summary,
+          generatedAt: auditHistory.generatedAt,
+          progress: {
+            jobId: auditHistory.jobId,
+            status: auditHistory.status,
+            stage: auditHistory.status,
+            current: 100,
+            total: 100,
+            message: '已加载审查历史。',
+          },
+        });
+      }
 
       ensureProgressWatch(docId);
 
       if (!pdf && !options?.suppressMissingPdfAlert) {
-        alert('该历史记录未保存 PDF，可继续问答。如需网格预览，请先点击“补齐 PDF”。');
+        alert('该历史记录未保存 PDF。你可以继续问答，但网格预览需要先补传 PDF。');
       }
     } catch (error) {
-      alert(error instanceof Error ? error.message : 'Failed to open history');
+      alert(error instanceof Error ? error.message : '打开历史记录失败');
     }
   }, [
     tabsByDocId,
@@ -590,9 +704,11 @@ function App() {
     getDocument,
     getChatHistory,
     getComplianceHistory,
+    getMultimodalAuditHistory,
     openOrFocusTab,
     setTabMessages,
     setTabCompliance,
+    setTabAudit,
     ensureProgressWatch,
   ]);
 
@@ -632,7 +748,7 @@ function App() {
     try {
       const sha = await sha256File(file);
       if (sha.toLowerCase() !== target.sha256?.toLowerCase()) {
-        alert('选择的 PDF 与该历史记录不匹配（SHA256 不同）');
+        alert('所选 PDF 与当前历史记录不匹配（SHA256 不一致）。');
         return;
       }
 
@@ -647,7 +763,7 @@ function App() {
 
       const attached = await attachPdf(target.docId, file);
       if (!attached) {
-        alert('已加载本地 PDF，但保存到后端失败');
+        alert('本地 PDF 已加载，但保存到后端失败。');
         return;
       }
 
@@ -657,7 +773,7 @@ function App() {
       }
       await refreshHistory();
     } catch (error) {
-      alert(error instanceof Error ? error.message : 'Failed to attach PDF');
+      alert(error instanceof Error ? error.message : '补传 PDF 失败');
     }
   }, [
     getDocument,
@@ -670,7 +786,7 @@ function App() {
   ]);
 
   const handleDeleteHistoryDoc = useCallback(async (docId: string) => {
-    const ok = window.confirm('确定要删除该记录吗？这会同时删除后端保存的 PDF/OCR/向量索引/聊天历史。');
+    const ok = window.confirm('确定删除该记录吗？这会删除后端保存的 PDF/OCR/向量索引/对话历史。');
     if (!ok) return;
 
     const deleted = await deleteDocument(docId);
@@ -706,7 +822,7 @@ function App() {
 
     const pages = getBackgroundOcrPages(tab.document);
     if (pages.length === 0) {
-      alert('该文档当前没有待识别页面');
+      alert('当前文档没有待 OCR 页');
       return;
     }
 
@@ -779,11 +895,11 @@ function App() {
               <div className="history-name">{d.filename || d.doc_id}</div>
               <div className="history-sub">
                 {d.created_at ? new Date(d.created_at).toLocaleString() : ''}
-                {' · '}
+                {' | '}
                 {d.total_pages || 0} 页
-                {' · '}
+                {' | '}
                 OCR:{d.ocr_required_pages?.length || 0}
-                {' · '}
+                {' | '}
                 {d.status}
               </div>
             </div>
@@ -799,7 +915,7 @@ function App() {
                   className="history-btn secondary"
                   onClick={() => handleAttachPdfClick(d.doc_id, d.sha256)}
                 >
-                  补齐 PDF
+                  补传 PDF
                 </button>
               )}
               <button
@@ -821,7 +937,7 @@ function App() {
     <div className="app">
       <header className="app-header">
         <div className="header-left">
-          <h1>PDF智能问答系统</h1>
+          <h1>PDF 智能问答系统</h1>
           <span className="version">V6.0</span>
         </div>
 
@@ -903,7 +1019,7 @@ function App() {
                           void handleCloseTab(docId);
                         }}
                       >
-                        ×
+                        x
                       </button>
                     </div>
                   </div>
@@ -924,7 +1040,7 @@ function App() {
                 {isAddMenuOpen && (
                   <div className="doc-tab-add-menu">
                     <button className="doc-tab-add-menu-item" onClick={openUploadPicker}>
-                      上传 PDF
+                      上传文档
                     </button>
                     <button className="doc-tab-add-menu-item" onClick={openHistoryModal}>
                       历史记录
@@ -940,22 +1056,22 @@ function App() {
           {!currentDocument ? (
             <div className="upload-area">
               <div className="upload-icon">PDF</div>
-              <h2>上传 PDF 文档</h2>
-              <p>拖放文件到此处，或点击选择文件</p>
+              <h2>上传文档</h2>
+              <p>拖拽文件到此处，或点击选择文件。</p>
 
               <button className="upload-btn" onClick={openUploadPicker}>
                 选择文件
               </button>
 
               <div className="history-panel">
-                <div className="history-title">历史文档</div>
+                <div className="history-title">历史记录</div>
                 {renderHistoryList()}
               </div>
             </div>
           ) : !pdfUrl ? (
             <div className="pdf-placeholder missing-pdf-state">
-              <p>该文档当前没有可预览的 PDF 文件。</p>
-              <p>可在历史列表点击“补齐 PDF”后继续网格预览与选择识别。</p>
+              <p>该文档当前没有可预览的 PDF。</p>
+              <p>请从历史记录补传匹配的 PDF，以启用网格预览和手动 OCR 选页。</p>
             </div>
           ) : (
             <PDFViewer pdfUrl={pdfUrl || undefined} onRecognizeQueued={ensureProgressWatch} />
@@ -966,7 +1082,7 @@ function App() {
               <div className="process-card">
                 <div className="progress-spinner" />
                 <div className="process-info">
-                  <h3>正在处理文档</h3>
+                  <h3>正在处理文档...</h3>
                   <p>{activeProgress.message || '处理中...'}</p>
                 </div>
               </div>
@@ -993,12 +1109,22 @@ function App() {
               className={`tab-btn ${rightPanelMode === 'compliance' ? 'active' : ''}`}
               onClick={() => setRightPanelMode('compliance')}
             >
-              技术合规检查
+              合规检查
+            </button>
+            <button
+              className={`tab-btn ${rightPanelMode === 'audit' ? 'active' : ''}`}
+              onClick={() => setRightPanelMode('audit')}
+            >
+              专项审查
             </button>
           </div>
 
           <div className="right-panel-content">
-            {rightPanelMode === 'chat' ? <ChatPanel /> : <CompliancePanel />}
+            {rightPanelMode === 'chat'
+              ? <ChatPanel />
+              : rightPanelMode === 'compliance'
+                ? <CompliancePanel />
+                : <MultimodalAuditPanel />}
           </div>
         </div>
       </main>
@@ -1006,7 +1132,7 @@ function App() {
       <input
         ref={uploadInputRef}
         type="file"
-        accept=".pdf"
+        accept=".pdf,.doc,.docx"
         multiple
         onChange={handleFileSelect}
         style={{ display: 'none' }}
@@ -1024,10 +1150,10 @@ function App() {
         <div className="upload-choice-overlay">
           <div className="upload-choice-modal">
             <h3>上传模式</h3>
-            <p>是否在上传后对全部页面执行 OCR 识别？</p>
+            <p>上传后立即对全部页面执行 OCR 吗？</p>
             <div className="upload-choice-actions">
               <button autoFocus onClick={() => handleUploadModeConfirm('manual')}>
-                否，仅加载
+                否，仅上传
               </button>
               <button onClick={() => handleUploadModeConfirm('full')}>
                 是，全部识别
@@ -1047,14 +1173,14 @@ function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="history-modal-header">
-              <h3>历史文档</h3>
+              <h3>历史记录</h3>
               <button
                 className="history-modal-close"
                 onClick={closeHistoryModal}
-                aria-label="关闭历史窗口"
+                aria-label="关闭历史弹窗"
                 title="关闭"
               >
-                ×
+                x
               </button>
             </div>
             <div className="history-panel history-panel-modal">
@@ -1070,4 +1196,9 @@ function App() {
 }
 
 export default App;
+
+
+
+
+
 

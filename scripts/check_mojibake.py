@@ -42,6 +42,11 @@ HIGH_CONFIDENCE_PATTERNS: Sequence[tuple[str, str]] = (
 SUSPECT_CHAR_SET = set("澶鍙鏂娌璇锛銆鈥锟")
 NON_ASCII_RUN_RE = re.compile(r"[^\x00-\x7F]{3,}")
 CJK_RE = re.compile(r"[\u3400-\u9FFF]")
+PRIVATE_USE_RE = re.compile(r"[\uE000-\uF8FF]")
+STRING_LITERAL_RE = re.compile(
+    r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`"
+)
+CJK_QUESTION_RE = re.compile(r"[\u3400-\u9FFF]\?|\?[\u3400-\u9FFF]")
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,14 @@ class Issue:
     line: int
     reason: str
     snippet: str
+
+
+def iter_string_literals(line: str) -> Iterator[str]:
+    for match in STRING_LITERAL_RE.finditer(line):
+        literal = match.group(0)
+        if len(literal) < 2:
+            continue
+        yield literal[1:-1]
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,6 +110,13 @@ def iter_files(targets: Sequence[str], extensions: set[str]) -> Iterator[Path]:
 
 
 def line_has_mojibake(line: str) -> str | None:
+    if PRIVATE_USE_RE.search(line):
+        return "private_use_char"
+
+    for literal in iter_string_literals(line):
+        if CJK_QUESTION_RE.search(literal):
+            return "cjk_question_mark_in_literal"
+
     for pattern, reason in HIGH_CONFIDENCE_PATTERNS:
         if pattern in line:
             return reason
@@ -119,12 +139,16 @@ def line_has_mojibake(line: str) -> str | None:
 
 
 def scan_file(path: Path) -> Iterable[Issue]:
+    raw = path.read_bytes()
+    issues: list[Issue] = []
+    if raw.startswith(b"\xef\xbb\xbf"):
+        issues.append(Issue(path=path, line=1, reason="utf8_bom", snippet="UTF-8 BOM detected"))
+
     try:
-        text = path.read_text(encoding="utf-8")
+        text = raw.decode("utf-8")
     except UnicodeDecodeError:
         return [Issue(path=path, line=1, reason="decode_error", snippet="cannot decode as UTF-8")]
 
-    issues: list[Issue] = []
     for line_num, line in enumerate(text.splitlines(), start=1):
         reason = line_has_mojibake(line)
         if not reason:

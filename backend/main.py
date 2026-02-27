@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI):
     os.makedirs(os.path.join("doc_store", "ocr"), exist_ok=True)
     os.makedirs(os.path.join("doc_store", "chat"), exist_ok=True)
     os.makedirs(os.path.join("doc_store", "compliance"), exist_ok=True)
+    os.makedirs(os.path.join("doc_store", "multimodal_audit"), exist_ok=True)
 
     try:
         documents.load_persisted_documents()
@@ -39,12 +40,22 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"[OCR_QUEUE] Failed to start OCR worker: {exc}")
 
+    try:
+        await documents.start_audit_worker()
+    except Exception as exc:
+        print(f"[AUDIT_QUEUE] Failed to start multimodal audit worker: {exc}")
+
     yield
 
     try:
         await documents.stop_ocr_worker()
     except Exception as exc:
         print(f"[OCR_QUEUE] Failed to stop OCR worker: {exc}")
+
+    try:
+        await documents.stop_audit_worker()
+    except Exception as exc:
+        print(f"[AUDIT_QUEUE] Failed to stop multimodal audit worker: {exc}")
 
 
 app = FastAPI(

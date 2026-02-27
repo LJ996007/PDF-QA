@@ -1,5 +1,5 @@
-﻿"""
-RAG寮曟搸 - ChromaDB鍚戦噺妫€绱?
+"""
+RAG 寮曟搸锛氬熀浜?ChromaDB 鐨勬绱笌绱㈠紩鏈嶅姟銆?
 """
 import chromadb
 from chromadb.config import Settings
@@ -26,7 +26,7 @@ except ImportError:
 
 
 class RAGEngine:
-    """RAG妫€绱㈠紩鎿庯紝鍩轰簬ChromaDB"""
+    """RAG 妫€绱㈠紩鎿庯紝璐熻矗鍚戦噺绱㈠紩銆佹贩鍚堟绱笌寮曠敤瀹氫綅銆?"""
     
     def __init__(self, persist_directory: str = "./chroma_db"):
         self.client = chromadb.PersistentClient(
@@ -34,7 +34,7 @@ class RAGEngine:
             settings=Settings(anonymized_telemetry=False)
         )
         self.collection = self.client.get_or_create_collection(
-            name="documents_v3",  # 浣跨敤v3闆嗗悎浠ョ‘淇濆叏鏂扮殑缁村害(2048)
+            name="documents_v3",  # 浣跨敤 v3 闆嗗悎锛岀‘淇濆悜閲忕淮搴︿负 2048銆?
             metadata={"hnsw:space": "cosine"}
         )
 
@@ -43,12 +43,12 @@ class RAGEngine:
     
     async def _get_embeddings(self, texts: List[str], api_key: Optional[str] = None) -> List[List[float]]:
         """
-        鑾峰彇鏂囨湰鍚戦噺锛堜娇鐢ㄦ櫤璋盇PI锛?
+        鑾峰彇鏂囨湰鍚戦噺锛堜紭鍏堜娇鐢ㄦ櫤璋?API锛夈€?
         """
         final_api_key = api_key or self.zhipu_api_key
         
         if not final_api_key:
-            # 濡傛灉娌℃湁API Key锛屼娇鐢ㄧ畝鍗曠殑鍝堝笇鍚戦噺锛堜粎鐢ㄤ簬娴嬭瘯锛?
+            # 鏃?API Key 鏃朵娇鐢ㄥ搱甯屽悜閲忥紙浠呯敤浜庢祴璇曞拰鍏滃簳锛夈€?
             return [self._simple_hash_embedding(text) for text in texts]
         
         headers = {
@@ -58,7 +58,7 @@ class RAGEngine:
         
         embeddings = []
         
-        # 鎵归噺澶勭悊锛屾瘡娆℃渶澶?0涓?
+        # 鎵归噺澶勭悊锛屾瘡娆℃渶澶?10 鏉°€?
         for i in range(0, len(texts), 10):
             batch = texts[i:i+10]
             
@@ -88,10 +88,10 @@ class RAGEngine:
         return embeddings
     
     def _simple_hash_embedding(self, text: str, dim: int = 2048) -> List[float]:
-        """绠€鍗曞搱甯屽悜閲忥紙鐢ㄤ簬娴嬭瘯锛屾棤API Key鏃讹級"""
+        """鐢熸垚绠€鏄撳搱甯屽悜閲忥紙鏃?API Key 鏃跺厹搴曪級銆?"""
         import hashlib
         hash_bytes = hashlib.sha256(text.encode()).digest()
-        # 鎵╁睍鍒版寚瀹氱淮搴?
+        # 鎵╁睍鍒版寚瀹氱淮搴︺€?
         embedding = []
         for i in range(dim):
             byte_idx = i % len(hash_bytes)
@@ -130,6 +130,43 @@ class RAGEngine:
 
         return False
 
+    def _normalize_for_dedup(self, text: str) -> str:
+        t = (text or "").strip().lower()
+        if not t:
+            return ""
+        t = re.sub(r"\s+", " ", t)
+        t = re.sub(r"[^\w\u4e00-\u9fff ]+", "", t)
+        return t.strip()
+
+    def _collect_header_footer_repeat_keys(self, pages: List[PageContent]) -> set:
+        if len(pages) < 3:
+            return set()
+
+        page_freq = {}
+        for page in pages:
+            lines = [ln.strip() for ln in (page.text or "").split("\n") if ln.strip()]
+            if not lines:
+                continue
+
+            sample = lines[:3]
+            if len(lines) > 3:
+                sample.extend(lines[-3:])
+
+            seen = set()
+            for line in sample:
+                if self._is_low_value_text(line):
+                    continue
+                key = self._normalize_for_dedup(line)
+                if len(key) < 6:
+                    continue
+                seen.add(key)
+
+            for key in seen:
+                page_freq[key] = page_freq.get(key, 0) + 1
+
+        threshold = max(3, int(len(pages) * 0.35))
+        return {k for k, v in page_freq.items() if v >= threshold}
+
     def _select_best_line_index(self, query: str, lines: List[str]) -> int:
         """
         Pick the most relevant line inside a multi-line chunk for tighter highlight bbox.
@@ -166,7 +203,7 @@ class RAGEngine:
     
     def _chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
         """
-        鏂囨湰鍒囧垎
+        鎸夐暱搴︿笌璇箟鏂偣鍒囧垎鏂囨湰銆?
         """
         if len(text) <= chunk_size:
             return [text] if text.strip() else []
@@ -177,9 +214,9 @@ class RAGEngine:
         while start < len(text):
             end = start + chunk_size
             
-            # 灏濊瘯鍦ㄥ彞瀛愮粨灏惧鍒囧垎
+            # 浼樺厛鍦ㄥ彞瀛愯竟鐣屽鍒囧垎锛屽噺灏戣涔夋柇瑁傘€?
             if end < len(text):
-                # 鎵炬渶杩戠殑鍙ュ彿銆佹崲琛岀瓑
+                # 鏌ユ壘鏈€杩戠殑鏍囩偣鎴栨崲琛屻€?
                 for sep in ["\n\n", "。", ".", "\n", "；", ";", "，", ","]:
                     last_sep = text[start:end].rfind(sep)
                     if last_sep > chunk_size // 2:
@@ -196,25 +233,27 @@ class RAGEngine:
     
     async def index_document(self, doc_id: str, pages: List[PageContent], api_key: Optional[str] = None) -> int:
         """
-        寤虹珛鏂囨。绱㈠紩
-        杩斿洖: 绱㈠紩鐨刢hunk鏁伴噺
+        寤虹珛鏂囨。绱㈠紩銆?
+        杩斿洖: 绱㈠紩鍚庣殑 chunk 鏁伴噺銆?
         """
         all_chunks = []
         all_ids = []
         all_metadatas = []
+        header_footer_repeat_keys = self._collect_header_footer_repeat_keys(pages)
+        seen_cross_page_chunks = set()
         
-        # 鍏ㄥ眬 chunk 璁℃暟鍣?(鐢ㄤ簬鐢熸垚 b0001)
+        # 鍏ㄥ眬 chunk 璁℃暟鍣紙鐢ㄤ簬鐢熸垚 b0001 杩欑被 block_id锛夈€?
         global_chunk_count = 0
 
         for page in pages:
             if not page.text:
                 continue
                 
-            # 妫€鏌ユ槸鍚︽湁OCR鍧愭爣鏁版嵁
+            # 妫€鏌ユ槸鍚﹀瓨鍦ㄥ潗鏍囨暟鎹紙OCR 鎴栧師鐢熸枃鏈級銆?
             has_coords = page.coordinates and len(page.coordinates) > 0
             
             if has_coords:
-                # 鏈夌簿纭潗鏍囷紙OCR鎴栧師鐢熸枃鏈級锛屾寜琛?鍧楃储寮?
+                # 鏈夌簿纭潗鏍囨椂锛屾寜琛屾瀯寤哄潡銆?
                 text_lines = page.text.split('\n')
                 # Build (text, bbox) entries first (skip OCR noise), then merge consecutive
                 # lines into slightly larger chunks for better retrieval quality.
@@ -223,8 +262,11 @@ class RAGEngine:
                     text = text.strip()
                     if not text or self._is_low_value_text(text):
                         continue
+                    line_key = self._normalize_for_dedup(text)
+                    if line_key and line_key in header_footer_repeat_keys:
+                        continue
 
-                    # 鑾峰彇瀵瑰簲鐨勫潗鏍?
+                    # 璇诲彇褰撳墠琛屽潗鏍囥€?
                     if idx < len(page.coordinates):
                         coord = page.coordinates[idx]
                         bbox_x = coord.x if hasattr(coord, 'x') else coord.get('x', 50)
@@ -232,7 +274,7 @@ class RAGEngine:
                         bbox_w = coord.w if hasattr(coord, 'w') else coord.get('w', 400)
                         bbox_h = coord.h if hasattr(coord, 'h') else coord.get('h', 30)
                     else:
-                        # 娌℃湁鍧愭爣鏃朵娇鐢ㄤ及绠?
+                        # 鍧愭爣缂哄け鏃朵娇鐢ㄤ及绠楀€笺€?
                         bbox_x = 50
                         bbox_y = (1.0 - idx / max(len(text_lines), 1)) * 700
                         bbox_w = 500
@@ -261,6 +303,15 @@ class RAGEngine:
                         current_bbox = None
                         current_line_bboxes = []
                         return
+
+                    dedup_key = self._normalize_for_dedup(chunk_text)
+                    if dedup_key and len(dedup_key) >= 80:
+                        if dedup_key in seen_cross_page_chunks:
+                            current_texts = []
+                            current_bbox = None
+                            current_line_bboxes = []
+                            return
+                        seen_cross_page_chunks.add(dedup_key)
 
                     global_chunk_count += 1
                     block_id = f"b{global_chunk_count:04d}"  # b0001, b0002...
@@ -316,12 +367,17 @@ class RAGEngine:
 
                 flush_current()
             else:
-                # 鏃犵簿纭潗鏍囷細鎸夋钀藉垏鍒?
+                # 鏃犵簿纭潗鏍囨椂锛屾寜娈佃惤鍒囧潡銆?
                 text_chunks = self._chunk_text(page.text)
 
                 for idx, chunk_text in enumerate(text_chunks):
                     if self._is_low_value_text(chunk_text):
                         continue
+                    dedup_key = self._normalize_for_dedup(chunk_text)
+                    if dedup_key and len(dedup_key) >= 80:
+                        if dedup_key in seen_cross_page_chunks:
+                            continue
+                        seen_cross_page_chunks.add(dedup_key)
                     global_chunk_count += 1
                     block_id = f"b{global_chunk_count:04d}"
                     chunk_id = f"{doc_id}_{block_id}"
@@ -344,10 +400,10 @@ class RAGEngine:
         if not all_chunks:
             return 0
         
-        # 鑾峰彇鍚戦噺
+        # 鐢熸垚鍚戦噺銆?
         embeddings = await self._get_embeddings(all_chunks, api_key)
         
-        # 瀛樺叆ChromaDB
+        # 鍐欏叆 ChromaDB銆?
         self.collection.add(
             ids=all_ids,
             embeddings=embeddings,
@@ -357,7 +413,7 @@ class RAGEngine:
         
         print(f"[RAG] Indexed {len(all_chunks)} chunks, first bbox: {all_metadatas[0] if all_metadatas else 'N/A'}")
         
-        # 澶辨晥缂撳瓨
+        # 绱㈠紩鏇存柊鍚庝娇 BM25 缂撳瓨澶辨晥銆?
         self._invalidate_bm25_cache(doc_id)
         
         return len(all_chunks)
@@ -370,7 +426,7 @@ class RAGEngine:
         api_key: Optional[str] = None
     ) -> int:
         """
-        绱㈠紩OCR缁撴灉
+        绱㈠紩 OCR 缁撴灉銆?
         """
         all_chunks = []
         all_ids = []
@@ -413,13 +469,13 @@ class RAGEngine:
 
 
     def _tokenize(self, text: str) -> List[str]:
-        """浣跨敤jieba杩涜涓枃鍒嗚瘝"""
+        """浣跨敤 jieba 杩涜涓枃鍒嗚瘝銆?"""
         if not HAS_BM25:
             return text.split()
         return list(jieba.cut_for_search(text))
 
     def _ensure_bm25_index(self, doc_id: str):
-        """纭繚鏂囨。鐨凚M25绱㈠紩宸叉瀯寤"""
+        """纭繚鎸囧畾鏂囨。鐨?BM25 绱㈠紩宸叉瀯寤恒€?"""
         if not HAS_BM25:
             return
 
@@ -427,7 +483,7 @@ class RAGEngine:
             return
 
         print(f"[Hybrid] Building BM25 index for {doc_id}...")
-        # 1. 浠嶤hromaDB鑾峰彇鏂囨。鎵€鏈夊垎鍧?
+        # 1. 浠?ChromaDB 璇诲彇鏂囨。鐨勫叏閮ㄥ垎鍧椼€?
         try:
             results = self.collection.get(
                 where={"doc_id": doc_id},
@@ -446,10 +502,10 @@ class RAGEngine:
             ids = results["ids"]
             texts = results["documents"]
             
-            # 2. 鍒嗚瘝
+            # 2. 鍒嗚瘝銆?
             tokenized_corpus = [self._tokenize(doc) for doc in texts]
             
-            # 3. 鏋勫缓绱㈠紩
+            # 3. 鏋勫缓 BM25 绱㈠紩銆?
             bm25 = BM25Okapi(tokenized_corpus)
             
             self.bm25_cache[doc_id] = {
@@ -465,7 +521,7 @@ class RAGEngine:
             traceback.print_exc()
 
     def _invalidate_bm25_cache(self, doc_id: str):
-        """澶辨晥BM25缂撳瓨"""
+        """浣挎寚瀹氭枃妗ｇ殑 BM25 缂撳瓨澶辨晥銆?"""
         if doc_id in self.bm25_cache:
             del self.bm25_cache[doc_id]
             print(f"[Hybrid] Cache invalidated for {doc_id}")
@@ -480,7 +536,7 @@ class RAGEngine:
         ensure_page_coverage: bool = False,
     ) -> List[TextChunk]:
         """
-        妫€绱㈢浉鍏虫枃鏈潡
+        妫€绱㈢浉鍏虫枃鏈潡骞惰繑鍥炲甫鍧愭爣鐨勫紩鐢ㄣ€?
         """
         allowed_page_set = set(allowed_pages or [])
         allowed_page_list = sorted(allowed_page_set)
@@ -492,13 +548,13 @@ class RAGEngine:
             print(message, flush=True)
             logger.info(message)
 
-        # 鑾峰彇鏌ヨ鍚戦噺
+        # 鐢熸垚鏌ヨ鍚戦噺銆?
         query_embedding = (await self._get_embeddings([query], api_key))[0]
 
-        # 妫€绱?
-        # 娣峰悎妫€绱㈠疄鐜?(RRF Fusion)
+        # 鎵ц娣峰悎妫€绱紙RRF 铻嶅悎锛夈€?
 
-        # 1. 鍚戦噺妫€绱?(Vector Search)
+
+        # 1. 鍚戦噺妫€绱紙Vector Search锛夈€?
         # Get enough candidates so we can filter OCR noise and still return top_k results.
         k_vector = max(top_k * 10, 50)
         vector_results = self.collection.query(
@@ -507,8 +563,8 @@ class RAGEngine:
             n_results=k_vector
         )
 
-        # 2. 鍏抽敭璇嶆绱?(BM25 Search)
-        # 纭繚绱㈠紩瀛樺湪
+        # 2. 鍏抽敭璇嶆绱紙BM25 Search锛夈€?
+        # 鍏堢‘淇?BM25 绱㈠紩瀛樺湪銆?
         self._ensure_bm25_index(doc_id)
 
         bm25_top_n = []
@@ -519,40 +575,40 @@ class RAGEngine:
 
             if bm25:
                 tokenized_query = self._tokenize(query)
-                # 鑾峰彇鎵€鏈夊垎鏁?
+                # 鑾峰彇鍏ㄩ儴寰楀垎銆?
                 doc_scores = bm25.get_scores(tokenized_query)
 
-                # 鑾峰彇Top N鐨勭储寮?
-                # argsort鏄崌搴忥紝鎵€浠ュ彇鏈€鍚巏涓苟鍙嶈浆
+                # 鑾峰彇 Top N 绱㈠紩锛坅rgsort 涓哄崌搴忥紝闇€鍙嶈浆锛夈€?
+
                 import numpy as np
                 top_indices = np.argsort(doc_scores)[-k_vector:][::-1]
 
                 for idx in top_indices:
-                    if doc_scores[idx] > 0:  # 鍙繚鐣欐湁鍖归厤椤圭殑缁撴灉
+                    if doc_scores[idx] > 0:  # 浠呬繚鐣欐湁鍖归厤鍒嗘暟鐨勭粨鏋溿€?
                         bm25_top_n.append(doc_ids[idx])
 
-        # 3. RRF铻嶅悎 (Reciprocal Rank Fusion)
+        # 3. RRF 铻嶅悎锛圧eciprocal Rank Fusion锛夈€?
         # Score = 1 / (k + rank)
         rrf_k = 60
         final_scores = {}  # {chunk_id: score}
 
-        # 澶勭悊鍚戦噺缁撴灉
+        # 鍚堝苟鍚戦噺妫€绱㈢粨鏋溿€?
         if vector_results["ids"] and vector_results["ids"][0]:
             for rank, chunk_id in enumerate(vector_results["ids"][0]):
                 final_scores[chunk_id] = final_scores.get(chunk_id, 0) + (1 / (rrf_k + rank + 1))
 
-        # 澶勭悊BM25缁撴灉
+        # 鍚堝苟 BM25 缁撴灉銆?
         for rank, chunk_id in enumerate(bm25_top_n):
             final_scores[chunk_id] = final_scores.get(chunk_id, 0) + (1 / (rrf_k + rank + 1))
 
-        # 4. 鎺掑簭骞惰幏鍙朇hunk璇︽儏
-        # 鎸夊垎鏁伴檷搴?
+        # 4. 鎺掑簭骞惰幏鍙?chunk 璇︽儏銆?
+
         candidate_ids = sorted(final_scores.keys(), key=lambda x: final_scores[x], reverse=True)
 
         if not candidate_ids:
             return []
 
-        # 鎵归噺鑾峰彇Chunk璇︽儏
+        # 鎵归噺鑾峰彇 chunk 璇︽儏銆?
         # ChromaDB .get()
         candidate_limit = max(top_k * 20, 200)
         candidate_ids = candidate_ids[:candidate_limit]
@@ -561,7 +617,7 @@ class RAGEngine:
             include=["documents", "metadatas"]
         )
 
-        # 鏋勫缓杩斿洖瀵硅薄锛岄渶瑕佹寜candidate_ids鐨勯『搴?
+        # 鎸?candidate_ids 椤哄簭鏋勫缓杩斿洖瀵硅薄銆?
         id_map = {id_: i for i, id_ in enumerate(final_chunks_data["ids"])}
 
         candidate_chunks: List[TextChunk] = []
@@ -664,7 +720,7 @@ class RAGEngine:
         return chunks
 
     def delete_document(self, doc_id: str):
-        """鍒犻櫎鏂囨。鐨勬墍鏈夌储寮"""
+        """鍒犻櫎鎸囧畾鏂囨。鐨勫叏閮ㄧ储寮曟暟鎹€?"""
         try:
             self.collection.delete(where={"doc_id": doc_id})
             self._invalidate_bm25_cache(doc_id)
@@ -674,6 +730,7 @@ class RAGEngine:
 
 # 鍏ㄥ眬瀹炰緥
 rag_engine = RAGEngine()
+
 
 
 

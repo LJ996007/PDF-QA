@@ -12,6 +12,7 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
 
     const [zhipuKey, setZhipuKey] = useState(config.zhipuApiKey);
     const [deepseekKey, setDeepseekKey] = useState(config.deepseekApiKey);
+    const [dashscopeKey, setDashscopeKey] = useState(config.dashscopeApiKey || '');
     const [ocrProvider] = useState<'baidu'>('baidu');
     const [baiduOcrUrl, setBaiduOcrUrl] = useState(config.baiduOcrUrl || '');
     const [baiduOcrToken, setBaiduOcrToken] = useState(config.baiduOcrToken || '');
@@ -23,6 +24,7 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
         updateConfig({
             zhipuApiKey: zhipuKey,
             deepseekApiKey: deepseekKey,
+            dashscopeApiKey: dashscopeKey,
             ocrProvider: 'baidu',
             baiduOcrUrl: baiduOcrUrl,
             baiduOcrToken: baiduOcrToken,
@@ -92,6 +94,20 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                     </div>
 
                     {/* OCR 设置 - 可折叠 */}
+                    <div className="setting-group">
+                        <label className="setting-label">
+                            DashScope API Key
+                            <span className="setting-hint">用于Qwen多模态专项审核（可选）</span>
+                        </label>
+                        <input
+                            type="password"
+                            className="setting-input"
+                            value={dashscopeKey}
+                            onChange={(e) => setDashscopeKey(e.target.value)}
+                            placeholder="sk-xxxxxxxx（可选）"
+                        />
+                    </div>
+
                     <div className="setting-section">
                         <button
                             className="section-toggle"

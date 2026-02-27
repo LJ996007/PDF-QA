@@ -32,7 +32,46 @@ export interface ComplianceItem {
 
 export type PageOcrStatus = 'unrecognized' | 'processing' | 'recognized' | 'failed';
 export type ViewMode = 'list' | 'grid';
-export type RightPanelMode = 'chat' | 'compliance';
+export type RightPanelMode = 'chat' | 'compliance' | 'audit';
+export type AuditType = 'contract' | 'certificate' | 'personnel';
+
+export interface MultimodalAuditItem {
+    checkKey: string;
+    checkTitle: string;
+    status: 'pass' | 'fail' | 'needs_review' | 'error';
+    reason: string;
+    confidence: number;
+    references: TextChunk[];
+}
+
+export interface MultimodalAuditSummary {
+    pass: number;
+    fail: number;
+    needs_review: number;
+    error: number;
+    total: number;
+}
+
+export interface MultimodalAuditProgress {
+    jobId: string;
+    status: 'idle' | 'queued' | 'running' | 'completed' | 'failed';
+    stage: string;
+    current: number;
+    total: number;
+    message?: string;
+}
+
+export interface MultimodalAuditState {
+    auditType: AuditType;
+    bidderName: string;
+    allowedPagesText: string;
+    customChecksText: string;
+    items: MultimodalAuditItem[];
+    summary: MultimodalAuditSummary;
+    progress: MultimodalAuditProgress | null;
+    lastJobId: string;
+    generatedAt: string;
+}
 
 export interface Document {
     id: string;
@@ -44,6 +83,16 @@ export interface Document {
     pageOcrStatus?: Record<number, PageOcrStatus>;
     ocrMode?: 'manual' | 'full';
     thumbnails: string[];
+    sourceFormat?: 'pdf' | 'doc' | 'docx';
+    convertedFrom?: 'doc' | 'docx' | null;
+    conversionStatus?: 'pending' | 'ok' | 'failed' | null;
+    conversionMs?: number | null;
+    conversionFailCount?: number;
+    ocrTriggeredPages?: number;
+    indexedChunks?: number;
+    avgContextTokens?: number | null;
+    contextQueryCount?: number;
+    textFallbackUsed?: boolean;
 }
 
 export interface ChatMessage {
@@ -66,6 +115,7 @@ export interface AppConfig {
     baiduOcrToken: string;
     ocrProvider: 'baidu';
     deepseekApiKey: string;
+    dashscopeApiKey: string;
     theme: 'light' | 'dark';
     pdfScale: number;
     selectedPromptId: string;
@@ -94,6 +144,7 @@ export interface TabState {
     complianceResults: ComplianceItem[];
     complianceMarkdown: string;
     complianceRequirements: string;
+    audit: MultimodalAuditState;
     rightPanelMode: RightPanelMode;
     progress: TabProgress | null;
 }
@@ -108,6 +159,7 @@ const DEFAULT_CONFIG: AppConfig = {
     baiduOcrToken: '',
     ocrProvider: 'baidu',
     deepseekApiKey: '',
+    dashscopeApiKey: '',
     theme: 'light',
     pdfScale: 1,
     selectedPromptId: '',
@@ -173,6 +225,85 @@ const normalizeProgress = (progress: unknown): TabProgress | null => {
     };
 };
 
+const createEmptyAuditSummary = (): MultimodalAuditSummary => ({
+    pass: 0,
+    fail: 0,
+    needs_review: 0,
+    error: 0,
+    total: 0,
+});
+
+const createDefaultAuditState = (): MultimodalAuditState => ({
+    auditType: 'contract',
+    bidderName: '',
+    allowedPagesText: '',
+    customChecksText: '',
+    items: [],
+    summary: createEmptyAuditSummary(),
+    progress: null,
+    lastJobId: '',
+    generatedAt: '',
+});
+
+const normalizeAuditState = (audit: unknown): MultimodalAuditState => {
+    const base = createDefaultAuditState();
+    if (!audit || typeof audit !== 'object') return base;
+    const raw = audit as Partial<MultimodalAuditState>;
+    const type = raw.auditType;
+    const auditType: AuditType =
+        type === 'certificate' || type === 'personnel' || type === 'contract'
+            ? type
+            : 'contract';
+    const itemsRaw = Array.isArray(raw.items) ? raw.items : [];
+    const items: MultimodalAuditItem[] = itemsRaw.map((item: any, idx: number) => ({
+        checkKey: String(item?.checkKey || item?.check_key || `item_${idx + 1}`),
+        checkTitle: String(item?.checkTitle || item?.check_title || `检查项 ${idx + 1}`),
+        status: ['pass', 'fail', 'needs_review', 'error'].includes(String(item?.status))
+            ? (item.status as MultimodalAuditItem['status'])
+            : 'needs_review',
+        reason: String(item?.reason || ''),
+        confidence: Number(item?.confidence || 0),
+        references: Array.isArray(item?.references) ? item.references : [],
+    }));
+
+    const summaryRaw = raw.summary as Partial<MultimodalAuditSummary> | undefined;
+    const summary: MultimodalAuditSummary = {
+        pass: Number(summaryRaw?.pass || 0),
+        fail: Number(summaryRaw?.fail || 0),
+        needs_review: Number(summaryRaw?.needs_review || 0),
+        error: Number(summaryRaw?.error || 0),
+        total: Number(summaryRaw?.total || items.length),
+    };
+
+    const progressRaw = raw.progress as Partial<MultimodalAuditProgress> | null | undefined;
+    let progress: MultimodalAuditProgress | null = null;
+    if (progressRaw && typeof progressRaw === 'object') {
+        const status = String(progressRaw.status || 'idle');
+        progress = {
+            jobId: String(progressRaw.jobId || ''),
+            status: ['idle', 'queued', 'running', 'completed', 'failed'].includes(status)
+                ? (status as MultimodalAuditProgress['status'])
+                : 'idle',
+            stage: String(progressRaw.stage || ''),
+            current: Number(progressRaw.current || 0),
+            total: Number(progressRaw.total || 100),
+            message: progressRaw.message ? String(progressRaw.message) : undefined,
+        };
+    }
+
+    return {
+        auditType,
+        bidderName: String(raw.bidderName || ''),
+        allowedPagesText: String(raw.allowedPagesText || ''),
+        customChecksText: String(raw.customChecksText || ''),
+        items,
+        summary,
+        progress,
+        lastJobId: String(raw.lastJobId || ''),
+        generatedAt: String(raw.generatedAt || ''),
+    };
+};
+
 const createTabState = (doc: Document, pdfUrl: string | null): TabState => ({
     docId: doc.id,
     document: doc,
@@ -187,6 +318,7 @@ const createTabState = (doc: Document, pdfUrl: string | null): TabState => ({
     complianceResults: [],
     complianceMarkdown: '',
     complianceRequirements: '',
+    audit: createDefaultAuditState(),
     rightPanelMode: 'chat',
     progress: null,
 });
@@ -213,6 +345,16 @@ const normalizeTabState = (tab: unknown, docId: string): TabState | null => {
         pageOcrStatus: (doc as Document).pageOcrStatus || {},
         ocrMode: (doc as Document).ocrMode || 'manual',
         thumbnails: Array.isArray((doc as Document).thumbnails) ? (doc as Document).thumbnails : [],
+        sourceFormat: ((doc as Document).sourceFormat || 'pdf') as Document['sourceFormat'],
+        convertedFrom: ((doc as Document).convertedFrom || null) as Document['convertedFrom'],
+        conversionStatus: ((doc as Document).conversionStatus || 'ok') as Document['conversionStatus'],
+        conversionMs: (doc as Document).conversionMs ?? null,
+        conversionFailCount: Number((doc as Document).conversionFailCount || 0),
+        ocrTriggeredPages: Number((doc as Document).ocrTriggeredPages || 0),
+        indexedChunks: Number((doc as Document).indexedChunks || 0),
+        avgContextTokens: (doc as Document).avgContextTokens ?? null,
+        contextQueryCount: Number((doc as Document).contextQueryCount || 0),
+        textFallbackUsed: Boolean((doc as Document).textFallbackUsed),
     };
 
     return {
@@ -229,7 +371,12 @@ const normalizeTabState = (tab: unknown, docId: string): TabState | null => {
         complianceResults: Array.isArray(raw.complianceResults) ? raw.complianceResults : [],
         complianceMarkdown: String(raw.complianceMarkdown || ''),
         complianceRequirements: String(raw.complianceRequirements || ''),
-        rightPanelMode: raw.rightPanelMode === 'compliance' ? 'compliance' : 'chat',
+        audit: normalizeAuditState(raw.audit),
+        rightPanelMode: raw.rightPanelMode === 'compliance'
+            ? 'compliance'
+            : raw.rightPanelMode === 'audit'
+                ? 'audit'
+                : 'chat',
         progress: normalizeProgress(raw.progress),
     };
 };
@@ -257,6 +404,7 @@ interface DocumentState {
     complianceResults: ComplianceItem[];
     complianceMarkdown: string;
     complianceRequirements: string;
+    audit: MultimodalAuditState;
     rightPanelMode: RightPanelMode;
     activeProgress: TabProgress | null;
 
@@ -275,6 +423,10 @@ interface DocumentState {
         docId: string,
         payload: { results?: ComplianceItem[]; markdown?: string; requirements?: string }
     ) => void;
+    setTabAudit: (
+        docId: string,
+        payload: Partial<MultimodalAuditState>
+    ) => void;
     setTabLoading: (docId: string, loading: boolean) => void;
     setTabRightPanelMode: (docId: string, mode: RightPanelMode) => void;
 
@@ -284,6 +436,7 @@ interface DocumentState {
 
     setComplianceResults: (results: ComplianceItem[], markdown: string) => void;
     setComplianceRequirements: (text: string) => void;
+    setAuditState: (patch: Partial<MultimodalAuditState>) => void;
 
     setScale: (scale: number) => void;
     setCurrentPage: (page: number) => void;
@@ -349,7 +502,7 @@ const initializeConfig = (): AppConfig => {
 
         return { ...DEFAULT_CONFIG, ...config };
     } catch (error) {
-        console.error('Failed to parse stored config:', error);
+        console.error('解析本地配置失败:', error);
         const examplePrompts = createExamplePrompts();
         return {
             ...DEFAULT_CONFIG,
@@ -379,6 +532,7 @@ const syncActiveFromTabs = (state: DocumentState): void => {
     state.complianceResults = tab?.complianceResults ?? [];
     state.complianceMarkdown = tab?.complianceMarkdown ?? '';
     state.complianceRequirements = tab?.complianceRequirements ?? '';
+    state.audit = tab?.audit ?? createDefaultAuditState();
     state.rightPanelMode = tab?.rightPanelMode ?? 'chat';
     state.activeProgress = tab?.progress ?? null;
 };
@@ -416,6 +570,7 @@ export const useDocumentStore = create<DocumentState>()(
             complianceResults: [],
             complianceMarkdown: '',
             complianceRequirements: '',
+            audit: createDefaultAuditState(),
             rightPanelMode: 'chat',
             activeProgress: null,
 
@@ -531,6 +686,27 @@ export const useDocumentStore = create<DocumentState>()(
                 }
             }),
 
+            setTabAudit: (docId, payload) => set((state) => {
+                const tab = state.tabsByDocId[docId];
+                if (!tab) return;
+                tab.audit = {
+                    ...tab.audit,
+                    ...payload,
+                    summary: payload.summary
+                        ? {
+                            pass: Number(payload.summary.pass || 0),
+                            fail: Number(payload.summary.fail || 0),
+                            needs_review: Number(payload.summary.needs_review || 0),
+                            error: Number(payload.summary.error || 0),
+                            total: Number(payload.summary.total || 0),
+                        }
+                        : tab.audit.summary,
+                };
+                if (state.activeDocId === docId) {
+                    syncActiveFromTabs(state);
+                }
+            }),
+
             setTabLoading: (docId, loading) => set((state) => {
                 const tab = state.tabsByDocId[docId];
                 if (!tab) return;
@@ -589,6 +765,24 @@ export const useDocumentStore = create<DocumentState>()(
             setComplianceRequirements: (text) => set((state) => {
                 updateActiveTab(state, (tab) => {
                     tab.complianceRequirements = text;
+                });
+            }),
+
+            setAuditState: (patch) => set((state) => {
+                updateActiveTab(state, (tab) => {
+                    tab.audit = {
+                        ...tab.audit,
+                        ...patch,
+                        summary: patch.summary
+                            ? {
+                                pass: Number(patch.summary.pass || 0),
+                                fail: Number(patch.summary.fail || 0),
+                                needs_review: Number(patch.summary.needs_review || 0),
+                                error: Number(patch.summary.error || 0),
+                                total: Number(patch.summary.total || 0),
+                            }
+                            : tab.audit.summary,
+                    };
                 });
             }),
 
@@ -699,7 +893,7 @@ export const useDocumentStore = create<DocumentState>()(
         })),
         {
             name: 'pdf-qa-storage',
-            version: 2,
+            version: 3,
             migrate: (persistedState: unknown) => {
                 if (!persistedState || typeof persistedState !== 'object') {
                     return persistedState as DocumentState;
@@ -728,7 +922,12 @@ export const useDocumentStore = create<DocumentState>()(
                     tabsByDocId[state.currentDocument.id].complianceResults = Array.isArray(state.complianceResults) ? state.complianceResults : [];
                     tabsByDocId[state.currentDocument.id].complianceMarkdown = String(state.complianceMarkdown || '');
                     tabsByDocId[state.currentDocument.id].complianceRequirements = String(state.complianceRequirements || '');
-                    tabsByDocId[state.currentDocument.id].rightPanelMode = state.rightPanelMode === 'compliance' ? 'compliance' : 'chat';
+                    tabsByDocId[state.currentDocument.id].audit = createDefaultAuditState();
+                    tabsByDocId[state.currentDocument.id].rightPanelMode = state.rightPanelMode === 'compliance'
+                        ? 'compliance'
+                        : state.rightPanelMode === 'audit'
+                            ? 'audit'
+                            : 'chat';
                     tabsByDocId[state.currentDocument.id].selectedPages = normalizeSelectedPages(state.selectedPages);
                     tabsByDocId[state.currentDocument.id].isLoading = Boolean(state.isLoading);
                 }
