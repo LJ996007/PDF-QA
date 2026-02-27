@@ -4,9 +4,6 @@ import { immer } from 'zustand/middleware/immer';
 import type { PromptTemplate } from '../constants/prompts';
 import { createExamplePrompts } from '../constants/prompts';
 
-/**
- * 边界框类型（PDF坐标）
- */
 export interface BoundingBox {
     page: number;
     x: number;
@@ -15,13 +12,10 @@ export interface BoundingBox {
     h: number;
 }
 
-/**
- * 文本块类型
- */
 export interface TextChunk {
     id: string;
     refId: string;
-    ref_id?: string; // Backend snake_case compatibility
+    ref_id?: string;
     content: string;
     page: number;
     bbox: BoundingBox;
@@ -36,20 +30,71 @@ export interface ComplianceItem {
     references: TextChunk[];
 }
 
-/**
- * 文档信息
- */
+export type PageOcrStatus = 'unrecognized' | 'processing' | 'recognized' | 'failed';
+export type ViewMode = 'list' | 'grid';
+export type RightPanelMode = 'chat' | 'compliance' | 'audit';
+export type AuditType = 'contract' | 'certificate' | 'personnel';
+
+export interface MultimodalAuditItem {
+    checkKey: string;
+    checkTitle: string;
+    status: 'pass' | 'fail' | 'needs_review' | 'error';
+    reason: string;
+    confidence: number;
+    references: TextChunk[];
+}
+
+export interface MultimodalAuditSummary {
+    pass: number;
+    fail: number;
+    needs_review: number;
+    error: number;
+    total: number;
+}
+
+export interface MultimodalAuditProgress {
+    jobId: string;
+    status: 'idle' | 'queued' | 'running' | 'completed' | 'failed';
+    stage: string;
+    current: number;
+    total: number;
+    message?: string;
+}
+
+export interface MultimodalAuditState {
+    auditType: AuditType;
+    bidderName: string;
+    allowedPagesText: string;
+    customChecksText: string;
+    items: MultimodalAuditItem[];
+    summary: MultimodalAuditSummary;
+    progress: MultimodalAuditProgress | null;
+    lastJobId: string;
+    generatedAt: string;
+}
+
 export interface Document {
     id: string;
     name: string;
     totalPages: number;
+    initialOcrRequiredPages?: number[];
     ocrRequiredPages: number[];
+    recognizedPages?: number[];
+    pageOcrStatus?: Record<number, PageOcrStatus>;
+    ocrMode?: 'manual' | 'full';
     thumbnails: string[];
+    sourceFormat?: 'pdf' | 'doc' | 'docx';
+    convertedFrom?: 'doc' | 'docx' | null;
+    conversionStatus?: 'pending' | 'ok' | 'failed' | null;
+    conversionMs?: number | null;
+    conversionFailCount?: number;
+    ocrTriggeredPages?: number;
+    indexedChunks?: number;
+    avgContextTokens?: number | null;
+    contextQueryCount?: number;
+    textFallbackUsed?: boolean;
 }
 
-/**
- * 对话消息
- */
 export interface ChatMessage {
     id: string;
     role: 'user' | 'assistant';
@@ -60,24 +105,48 @@ export interface ChatMessage {
     isStreaming?: boolean;
 }
 
-/**
- * 应用配置
- */
 export interface AppConfig {
     apiBaseUrl: string;
-    embeddingsProvider: 'zhipu' | 'ollama'; // 暂时只支持智谱
+    embeddingsProvider: 'zhipu' | 'ollama';
     zhipuApiKey: string;
     baiduApiKey: string;
     baiduSecretKey: string;
     baiduOcrUrl: string;
     baiduOcrToken: string;
-    ocrProvider: 'baidu';  // OCR提供商
+    ocrProvider: 'baidu';
     deepseekApiKey: string;
+    dashscopeApiKey: string;
     theme: 'light' | 'dark';
     pdfScale: number;
-    // 提示词相关
-    selectedPromptId: string;      // 当前选中的提示词ID
-    customPrompts: PromptTemplate[]; // 用户自定义提示词列表
+    selectedPromptId: string;
+    customPrompts: PromptTemplate[];
+}
+
+export interface TabProgress {
+    stage: 'extracting' | 'embedding' | 'ocr' | 'completed' | 'failed';
+    current: number;
+    total: number;
+    message?: string;
+    document_id?: string;
+}
+
+export interface TabState {
+    docId: string;
+    document: Document;
+    pdfUrl: string | null;
+    scale: number;
+    currentPage: number;
+    highlights: TextChunk[];
+    viewMode: ViewMode;
+    selectedPages: number[];
+    messages: ChatMessage[];
+    isLoading: boolean;
+    complianceResults: ComplianceItem[];
+    complianceMarkdown: string;
+    complianceRequirements: string;
+    audit: MultimodalAuditState;
+    rightPanelMode: RightPanelMode;
+    progress: TabProgress | null;
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -90,81 +159,312 @@ const DEFAULT_CONFIG: AppConfig = {
     baiduOcrToken: '',
     ocrProvider: 'baidu',
     deepseekApiKey: '',
+    dashscopeApiKey: '',
     theme: 'light',
-    pdfScale: 1.0,
-    selectedPromptId: '', // Will be set by initializeConfig
-    customPrompts: [],    // Will be set by initializeConfig
+    pdfScale: 1,
+    selectedPromptId: '',
+    customPrompts: [],
 };
 
-/**
- * Store状态
- */
+const toDate = (value: unknown): Date => {
+    if (value instanceof Date) return value;
+    if (typeof value === 'string' || typeof value === 'number') {
+        const parsed = new Date(value);
+        if (!Number.isNaN(parsed.getTime())) {
+            return parsed;
+        }
+    }
+    return new Date();
+};
+
+const normalizeMessages = (messages: unknown): ChatMessage[] => {
+    if (!Array.isArray(messages)) return [];
+    return messages
+        .map((m) => {
+            if (!m || typeof m !== 'object') return null;
+            const raw = m as Partial<ChatMessage>;
+            if (!raw.id || !raw.role) return null;
+            return {
+                id: String(raw.id),
+                role: raw.role,
+                content: String(raw.content || ''),
+                references: Array.isArray(raw.references) ? raw.references : [],
+                activeRefs: Array.isArray(raw.activeRefs) ? raw.activeRefs : [],
+                timestamp: toDate(raw.timestamp),
+                isStreaming: Boolean(raw.isStreaming),
+            } as ChatMessage;
+        })
+        .filter((m): m is ChatMessage => Boolean(m));
+};
+
+const normalizeSelectedPages = (pages: unknown): number[] => {
+    if (!Array.isArray(pages)) return [];
+    const uniq = new Set<number>();
+    pages.forEach((p) => {
+        const num = Number(p);
+        if (Number.isInteger(num) && num > 0) {
+            uniq.add(num);
+        }
+    });
+    return Array.from(uniq).sort((a, b) => a - b);
+};
+
+const normalizeProgress = (progress: unknown): TabProgress | null => {
+    if (!progress || typeof progress !== 'object') return null;
+    const raw = progress as Partial<TabProgress>;
+    const stage = raw.stage;
+    if (!stage || !['extracting', 'embedding', 'ocr', 'completed', 'failed'].includes(stage)) {
+        return null;
+    }
+    return {
+        stage,
+        current: Number(raw.current || 0),
+        total: Number(raw.total || 100),
+        message: raw.message ? String(raw.message) : undefined,
+        document_id: raw.document_id ? String(raw.document_id) : undefined,
+    };
+};
+
+const createEmptyAuditSummary = (): MultimodalAuditSummary => ({
+    pass: 0,
+    fail: 0,
+    needs_review: 0,
+    error: 0,
+    total: 0,
+});
+
+const createDefaultAuditState = (): MultimodalAuditState => ({
+    auditType: 'contract',
+    bidderName: '',
+    allowedPagesText: '',
+    customChecksText: '',
+    items: [],
+    summary: createEmptyAuditSummary(),
+    progress: null,
+    lastJobId: '',
+    generatedAt: '',
+});
+
+const normalizeAuditState = (audit: unknown): MultimodalAuditState => {
+    const base = createDefaultAuditState();
+    if (!audit || typeof audit !== 'object') return base;
+    const raw = audit as Partial<MultimodalAuditState>;
+    const type = raw.auditType;
+    const auditType: AuditType =
+        type === 'certificate' || type === 'personnel' || type === 'contract'
+            ? type
+            : 'contract';
+    const itemsRaw = Array.isArray(raw.items) ? raw.items : [];
+    const items: MultimodalAuditItem[] = itemsRaw.map((item: any, idx: number) => ({
+        checkKey: String(item?.checkKey || item?.check_key || `item_${idx + 1}`),
+        checkTitle: String(item?.checkTitle || item?.check_title || `检查项 ${idx + 1}`),
+        status: ['pass', 'fail', 'needs_review', 'error'].includes(String(item?.status))
+            ? (item.status as MultimodalAuditItem['status'])
+            : 'needs_review',
+        reason: String(item?.reason || ''),
+        confidence: Number(item?.confidence || 0),
+        references: Array.isArray(item?.references) ? item.references : [],
+    }));
+
+    const summaryRaw = raw.summary as Partial<MultimodalAuditSummary> | undefined;
+    const summary: MultimodalAuditSummary = {
+        pass: Number(summaryRaw?.pass || 0),
+        fail: Number(summaryRaw?.fail || 0),
+        needs_review: Number(summaryRaw?.needs_review || 0),
+        error: Number(summaryRaw?.error || 0),
+        total: Number(summaryRaw?.total || items.length),
+    };
+
+    const progressRaw = raw.progress as Partial<MultimodalAuditProgress> | null | undefined;
+    let progress: MultimodalAuditProgress | null = null;
+    if (progressRaw && typeof progressRaw === 'object') {
+        const status = String(progressRaw.status || 'idle');
+        progress = {
+            jobId: String(progressRaw.jobId || ''),
+            status: ['idle', 'queued', 'running', 'completed', 'failed'].includes(status)
+                ? (status as MultimodalAuditProgress['status'])
+                : 'idle',
+            stage: String(progressRaw.stage || ''),
+            current: Number(progressRaw.current || 0),
+            total: Number(progressRaw.total || 100),
+            message: progressRaw.message ? String(progressRaw.message) : undefined,
+        };
+    }
+
+    return {
+        auditType,
+        bidderName: String(raw.bidderName || ''),
+        allowedPagesText: String(raw.allowedPagesText || ''),
+        customChecksText: String(raw.customChecksText || ''),
+        items,
+        summary,
+        progress,
+        lastJobId: String(raw.lastJobId || ''),
+        generatedAt: String(raw.generatedAt || ''),
+    };
+};
+
+const createTabState = (doc: Document, pdfUrl: string | null): TabState => ({
+    docId: doc.id,
+    document: doc,
+    pdfUrl,
+    scale: 1,
+    currentPage: 1,
+    highlights: [],
+    viewMode: 'list',
+    selectedPages: [],
+    messages: [],
+    isLoading: false,
+    complianceResults: [],
+    complianceMarkdown: '',
+    complianceRequirements: '',
+    audit: createDefaultAuditState(),
+    rightPanelMode: 'chat',
+    progress: null,
+});
+
+const normalizeTabState = (tab: unknown, docId: string): TabState | null => {
+    if (!tab || typeof tab !== 'object') return null;
+    const raw = tab as Partial<TabState>;
+    const doc = raw.document;
+    if (!doc || typeof doc !== 'object') return null;
+
+    const normalizedDoc: Document = {
+        id: String((doc as Document).id || docId),
+        name: String((doc as Document).name || docId),
+        totalPages: Number((doc as Document).totalPages || 0),
+        initialOcrRequiredPages: Array.isArray((doc as Document).initialOcrRequiredPages)
+            ? (doc as Document).initialOcrRequiredPages
+            : [],
+        ocrRequiredPages: Array.isArray((doc as Document).ocrRequiredPages)
+            ? (doc as Document).ocrRequiredPages
+            : [],
+        recognizedPages: Array.isArray((doc as Document).recognizedPages)
+            ? (doc as Document).recognizedPages
+            : [],
+        pageOcrStatus: (doc as Document).pageOcrStatus || {},
+        ocrMode: (doc as Document).ocrMode || 'manual',
+        thumbnails: Array.isArray((doc as Document).thumbnails) ? (doc as Document).thumbnails : [],
+        sourceFormat: ((doc as Document).sourceFormat || 'pdf') as Document['sourceFormat'],
+        convertedFrom: ((doc as Document).convertedFrom || null) as Document['convertedFrom'],
+        conversionStatus: ((doc as Document).conversionStatus || 'ok') as Document['conversionStatus'],
+        conversionMs: (doc as Document).conversionMs ?? null,
+        conversionFailCount: Number((doc as Document).conversionFailCount || 0),
+        ocrTriggeredPages: Number((doc as Document).ocrTriggeredPages || 0),
+        indexedChunks: Number((doc as Document).indexedChunks || 0),
+        avgContextTokens: (doc as Document).avgContextTokens ?? null,
+        contextQueryCount: Number((doc as Document).contextQueryCount || 0),
+        textFallbackUsed: Boolean((doc as Document).textFallbackUsed),
+    };
+
+    return {
+        docId,
+        document: normalizedDoc,
+        pdfUrl: typeof raw.pdfUrl === 'string' ? raw.pdfUrl : null,
+        scale: Number(raw.scale || 1),
+        currentPage: Number(raw.currentPage || 1),
+        highlights: Array.isArray(raw.highlights) ? raw.highlights : [],
+        viewMode: raw.viewMode === 'grid' ? 'grid' : 'list',
+        selectedPages: normalizeSelectedPages(raw.selectedPages),
+        messages: normalizeMessages(raw.messages),
+        isLoading: Boolean(raw.isLoading),
+        complianceResults: Array.isArray(raw.complianceResults) ? raw.complianceResults : [],
+        complianceMarkdown: String(raw.complianceMarkdown || ''),
+        complianceRequirements: String(raw.complianceRequirements || ''),
+        audit: normalizeAuditState(raw.audit),
+        rightPanelMode: raw.rightPanelMode === 'compliance'
+            ? 'compliance'
+            : raw.rightPanelMode === 'audit'
+                ? 'audit'
+                : 'chat',
+        progress: normalizeProgress(raw.progress),
+    };
+};
+
 interface DocumentState {
-    // 当前文档
+    tabsOrder: string[];
+    tabsByDocId: Record<string, TabState>;
+    activeDocId: string | null;
+    activeTab: TabState | null;
+
     currentDocument: Document | null;
     pdfUrl: string | null;
 
-    // PDF渲染状态
     scale: number;
     currentPage: number;
     highlights: TextChunk[];
+    viewMode: ViewMode;
+    selectedPages: number[];
 
-    // 对话状态
     messages: ChatMessage[];
     isLoading: boolean;
 
-    // 配置
     config: AppConfig;
 
-    // 合规性检查状态
     complianceResults: ComplianceItem[];
     complianceMarkdown: string;
     complianceRequirements: string;
+    audit: MultimodalAuditState;
+    rightPanelMode: RightPanelMode;
+    activeProgress: TabProgress | null;
 
-    // Actions
-    setDocument: (doc: Document, pdfUrl: string) => void;
+    openOrFocusTab: (doc: Document, pdfUrl: string | null) => void;
+    activateTab: (docId: string) => void;
+    closeTab: (docId: string) => string | null;
+    updateTabDocument: (docId: string, doc: Document) => void;
+    setTabPdfUrl: (docId: string, pdfUrl: string | null) => void;
+    setTabMessages: (docId: string, messages: ChatMessage[]) => void;
+    setTabViewerState: (
+        docId: string,
+        patch: Partial<Pick<TabState, 'scale' | 'currentPage' | 'viewMode' | 'highlights' | 'selectedPages'>>
+    ) => void;
+    setTabProgress: (docId: string, progress: TabProgress | null) => void;
+    setTabCompliance: (
+        docId: string,
+        payload: { results?: ComplianceItem[]; markdown?: string; requirements?: string }
+    ) => void;
+    setTabAudit: (
+        docId: string,
+        payload: Partial<MultimodalAuditState>
+    ) => void;
+    setTabLoading: (docId: string, loading: boolean) => void;
+    setTabRightPanelMode: (docId: string, mode: RightPanelMode) => void;
+
+    setDocument: (doc: Document, pdfUrl: string | null) => void;
+    updateDocumentOcrStatus: (recognizedPages: number[], pageOcrStatus: Record<number, PageOcrStatus>) => void;
     clearDocument: () => void;
 
-    // 合规性Actions
     setComplianceResults: (results: ComplianceItem[], markdown: string) => void;
     setComplianceRequirements: (text: string) => void;
+    setAuditState: (patch: Partial<MultimodalAuditState>) => void;
 
     setScale: (scale: number) => void;
     setCurrentPage: (page: number) => void;
     setHighlights: (chunks: TextChunk[]) => void;
     addHighlight: (chunk: TextChunk) => void;
     clearHighlights: () => void;
+    setViewMode: (mode: ViewMode) => void;
+    setSelectedPages: (pages: number[]) => void;
 
-    // 消息
     addMessage: (message: ChatMessage) => void;
+    setMessages: (messages: ChatMessage[]) => void;
     updateMessage: (id: string, updates: Partial<ChatMessage>) => void;
     appendToMessage: (id: string, text: string, refs?: string[]) => void;
     clearMessages: () => void;
     setLoading: (loading: boolean) => void;
 
-    // 配置
+    setRightPanelMode: (mode: RightPanelMode) => void;
+
     updateConfig: (config: Partial<AppConfig>) => void;
 }
 
-// 初始化配置（首次启动或兼容旧数据）
 const initializeConfig = (): AppConfig => {
     const stored = localStorage.getItem('pdf-qa-storage');
 
     if (!stored) {
-        // 首次启动，创建示例提示词
         const examplePrompts = createExamplePrompts();
         return {
-            apiBaseUrl: 'http://localhost:8000',
-            embeddingsProvider: 'zhipu',
-            zhipuApiKey: '',
-            deepseekApiKey: '',
-            baiduApiKey: '',
-            baiduSecretKey: '',
-            ocrProvider: 'baidu',
-            baiduOcrUrl: '',
-            baiduOcrToken: '',
-            theme: 'light',
-            pdfScale: 1.0,
+            ...DEFAULT_CONFIG,
             selectedPromptId: examplePrompts[0].id,
             customPrompts: examplePrompts,
         };
@@ -177,23 +477,12 @@ const initializeConfig = (): AppConfig => {
         if (!config) {
             const examplePrompts = createExamplePrompts();
             return {
-                apiBaseUrl: 'http://localhost:8000',
-                embeddingsProvider: 'zhipu',
-                zhipuApiKey: '',
-                deepseekApiKey: '',
-                baiduApiKey: '',
-                baiduSecretKey: '',
-                ocrProvider: 'baidu',
-                baiduOcrUrl: '',
-                baiduOcrToken: '',
-                theme: 'light',
-                pdfScale: 1.0,
+                ...DEFAULT_CONFIG,
                 selectedPromptId: examplePrompts[0].id,
                 customPrompts: examplePrompts,
             };
         }
 
-        // 兼容旧版本：移除 isBuiltin 字段
         if (config.customPrompts) {
             config.customPrompts = config.customPrompts.map((p: any) => ({
                 id: p.id,
@@ -205,154 +494,484 @@ const initializeConfig = (): AppConfig => {
             }));
         }
 
-        // 如果没有提示词，初始化为示例
         if (!config?.customPrompts || config.customPrompts.length === 0) {
             const examplePrompts = createExamplePrompts();
             config.customPrompts = examplePrompts;
             config.selectedPromptId = examplePrompts[0].id;
         }
 
-        // 确保所有字段都存在（合并默认配置）
         return { ...DEFAULT_CONFIG, ...config };
     } catch (error) {
-        console.error('Failed to parse stored config:', error);
-        // 解析失败，返回默认配置
+        console.error('解析本地配置失败:', error);
         const examplePrompts = createExamplePrompts();
         return {
-            apiBaseUrl: 'http://localhost:8000',
-            embeddingsProvider: 'zhipu',
-            zhipuApiKey: '',
-            deepseekApiKey: '',
-            baiduApiKey: '',
-            baiduSecretKey: '',
-            ocrProvider: 'baidu',
-            baiduOcrUrl: '',
-            baiduOcrToken: '',
-            theme: 'light',
-            pdfScale: 1.0,
+            ...DEFAULT_CONFIG,
             selectedPromptId: examplePrompts[0].id,
             customPrompts: examplePrompts,
         };
     }
 };
 
+const syncActiveFromTabs = (state: DocumentState): void => {
+    const activeDocId = state.activeDocId;
+    const tab = activeDocId ? state.tabsByDocId[activeDocId] : null;
+
+    state.activeTab = tab || null;
+    state.currentDocument = tab?.document || null;
+    state.pdfUrl = tab?.pdfUrl || null;
+
+    state.scale = tab?.scale ?? 1;
+    state.currentPage = tab?.currentPage ?? 1;
+    state.highlights = tab?.highlights ?? [];
+    state.viewMode = tab?.viewMode ?? 'list';
+    state.selectedPages = tab?.selectedPages ?? [];
+
+    state.messages = tab?.messages ?? [];
+    state.isLoading = tab?.isLoading ?? false;
+
+    state.complianceResults = tab?.complianceResults ?? [];
+    state.complianceMarkdown = tab?.complianceMarkdown ?? '';
+    state.complianceRequirements = tab?.complianceRequirements ?? '';
+    state.audit = tab?.audit ?? createDefaultAuditState();
+    state.rightPanelMode = tab?.rightPanelMode ?? 'chat';
+    state.activeProgress = tab?.progress ?? null;
+};
+
+const updateActiveTab = (state: DocumentState, updater: (tab: TabState) => void): void => {
+    if (!state.activeDocId) return;
+    const tab = state.tabsByDocId[state.activeDocId];
+    if (!tab) return;
+    updater(tab);
+    syncActiveFromTabs(state);
+};
+
 export const useDocumentStore = create<DocumentState>()(
     persist(
         immer((set) => ({
-            // 初始状态
+            tabsOrder: [],
+            tabsByDocId: {},
+            activeDocId: null,
+            activeTab: null,
+
             currentDocument: null,
             pdfUrl: null,
-            scale: 1.0,
+
+            scale: 1,
             currentPage: 1,
             highlights: [],
+            viewMode: 'list',
+            selectedPages: [],
+
             messages: [],
             isLoading: false,
+
             config: initializeConfig(),
 
-            // 合规性初始状态
             complianceResults: [],
             complianceMarkdown: '',
             complianceRequirements: '',
+            audit: createDefaultAuditState(),
+            rightPanelMode: 'chat',
+            activeProgress: null,
 
-            // 文档操作
+            openOrFocusTab: (doc, pdfUrl) => set((state) => {
+                const existing = state.tabsByDocId[doc.id];
+                if (existing) {
+                    existing.document = doc;
+                    if (pdfUrl || !existing.pdfUrl) {
+                        existing.pdfUrl = pdfUrl;
+                    }
+                } else {
+                    state.tabsByDocId[doc.id] = createTabState(doc, pdfUrl);
+                    state.tabsOrder.push(doc.id);
+                }
+                state.activeDocId = doc.id;
+                syncActiveFromTabs(state);
+            }),
+
+            activateTab: (docId) => set((state) => {
+                if (!state.tabsByDocId[docId]) return;
+                state.activeDocId = docId;
+                syncActiveFromTabs(state);
+            }),
+
+            closeTab: (docId) => {
+                let closedPdfUrl: string | null = null;
+                set((state) => {
+                    const existing = state.tabsByDocId[docId];
+                    if (!existing) return;
+
+                    closedPdfUrl = existing.pdfUrl;
+                    delete state.tabsByDocId[docId];
+                    const idx = state.tabsOrder.indexOf(docId);
+                    if (idx !== -1) {
+                        state.tabsOrder.splice(idx, 1);
+                    }
+
+                    if (state.activeDocId === docId) {
+                        const fallbackId = state.tabsOrder[idx - 1] || state.tabsOrder[idx] || state.tabsOrder[0] || null;
+                        state.activeDocId = fallbackId;
+                    }
+
+                    syncActiveFromTabs(state);
+                });
+                return closedPdfUrl;
+            },
+
+            updateTabDocument: (docId, doc) => set((state) => {
+                const tab = state.tabsByDocId[docId];
+                if (!tab) return;
+                tab.document = doc;
+                if (state.activeDocId === docId) {
+                    syncActiveFromTabs(state);
+                }
+            }),
+
+            setTabPdfUrl: (docId, pdfUrl) => set((state) => {
+                const tab = state.tabsByDocId[docId];
+                if (!tab) return;
+                tab.pdfUrl = pdfUrl;
+                if (state.activeDocId === docId) {
+                    syncActiveFromTabs(state);
+                }
+            }),
+
+            setTabMessages: (docId, messages) => set((state) => {
+                const tab = state.tabsByDocId[docId];
+                if (!tab) return;
+                tab.messages = messages;
+                if (state.activeDocId === docId) {
+                    syncActiveFromTabs(state);
+                }
+            }),
+
+            setTabViewerState: (docId, patch) => set((state) => {
+                const tab = state.tabsByDocId[docId];
+                if (!tab) return;
+
+                if (typeof patch.scale === 'number') tab.scale = patch.scale;
+                if (typeof patch.currentPage === 'number') tab.currentPage = patch.currentPage;
+                if (patch.viewMode === 'grid' || patch.viewMode === 'list') tab.viewMode = patch.viewMode;
+                if (Array.isArray(patch.highlights)) tab.highlights = patch.highlights;
+                if (Array.isArray(patch.selectedPages)) tab.selectedPages = normalizeSelectedPages(patch.selectedPages);
+
+                if (state.activeDocId === docId) {
+                    syncActiveFromTabs(state);
+                }
+            }),
+
+            setTabProgress: (docId, progress) => set((state) => {
+                const tab = state.tabsByDocId[docId];
+                if (!tab) return;
+                tab.progress = progress;
+                if (state.activeDocId === docId) {
+                    syncActiveFromTabs(state);
+                }
+            }),
+
+            setTabCompliance: (docId, payload) => set((state) => {
+                const tab = state.tabsByDocId[docId];
+                if (!tab) return;
+                if (Array.isArray(payload.results)) {
+                    tab.complianceResults = payload.results;
+                }
+                if (typeof payload.markdown === 'string') {
+                    tab.complianceMarkdown = payload.markdown;
+                }
+                if (typeof payload.requirements === 'string') {
+                    tab.complianceRequirements = payload.requirements;
+                }
+                if (state.activeDocId === docId) {
+                    syncActiveFromTabs(state);
+                }
+            }),
+
+            setTabAudit: (docId, payload) => set((state) => {
+                const tab = state.tabsByDocId[docId];
+                if (!tab) return;
+                tab.audit = {
+                    ...tab.audit,
+                    ...payload,
+                    summary: payload.summary
+                        ? {
+                            pass: Number(payload.summary.pass || 0),
+                            fail: Number(payload.summary.fail || 0),
+                            needs_review: Number(payload.summary.needs_review || 0),
+                            error: Number(payload.summary.error || 0),
+                            total: Number(payload.summary.total || 0),
+                        }
+                        : tab.audit.summary,
+                };
+                if (state.activeDocId === docId) {
+                    syncActiveFromTabs(state);
+                }
+            }),
+
+            setTabLoading: (docId, loading) => set((state) => {
+                const tab = state.tabsByDocId[docId];
+                if (!tab) return;
+                tab.isLoading = loading;
+                if (state.activeDocId === docId) {
+                    syncActiveFromTabs(state);
+                }
+            }),
+
+            setTabRightPanelMode: (docId, mode) => set((state) => {
+                const tab = state.tabsByDocId[docId];
+                if (!tab) return;
+                tab.rightPanelMode = mode;
+                if (state.activeDocId === docId) {
+                    syncActiveFromTabs(state);
+                }
+            }),
+
             setDocument: (doc, pdfUrl) => set((state) => {
-                state.currentDocument = doc;
-                state.pdfUrl = pdfUrl;
-                state.currentPage = 1;
-                state.highlights = [];
-                state.messages = [];
-                // 重置合规性状态
-                state.complianceResults = [];
-                state.complianceMarkdown = '';
-                state.complianceRequirements = '';
+                const existing = state.tabsByDocId[doc.id];
+                if (existing) {
+                    existing.document = doc;
+                    if (pdfUrl || !existing.pdfUrl) {
+                        existing.pdfUrl = pdfUrl;
+                    }
+                    existing.currentPage = 1;
+                    existing.highlights = [];
+                } else {
+                    state.tabsByDocId[doc.id] = createTabState(doc, pdfUrl);
+                    state.tabsOrder.push(doc.id);
+                }
+                state.activeDocId = doc.id;
+                syncActiveFromTabs(state);
             }),
 
-            clearDocument: () => set((state) => {
-                state.currentDocument = null;
-                state.pdfUrl = null;
-                state.highlights = [];
-                state.messages = [];
-                state.complianceResults = [];
-                state.complianceMarkdown = '';
-                state.complianceRequirements = '';
+            updateDocumentOcrStatus: (recognizedPages, pageOcrStatus) => set((state) => {
+                updateActiveTab(state, (tab) => {
+                    tab.document.recognizedPages = recognizedPages;
+                    tab.document.pageOcrStatus = pageOcrStatus;
+                });
             }),
 
-            // 合规性操作
+            clearDocument: () => {
+                const activeDocId = useDocumentStore.getState().activeDocId;
+                if (!activeDocId) return;
+                useDocumentStore.getState().closeTab(activeDocId);
+            },
+
             setComplianceResults: (results, markdown) => set((state) => {
-                state.complianceResults = results;
-                state.complianceMarkdown = markdown;
+                updateActiveTab(state, (tab) => {
+                    tab.complianceResults = results;
+                    tab.complianceMarkdown = markdown;
+                });
             }),
 
             setComplianceRequirements: (text) => set((state) => {
-                state.complianceRequirements = text;
+                updateActiveTab(state, (tab) => {
+                    tab.complianceRequirements = text;
+                });
             }),
 
-            // 渲染状态
+            setAuditState: (patch) => set((state) => {
+                updateActiveTab(state, (tab) => {
+                    tab.audit = {
+                        ...tab.audit,
+                        ...patch,
+                        summary: patch.summary
+                            ? {
+                                pass: Number(patch.summary.pass || 0),
+                                fail: Number(patch.summary.fail || 0),
+                                needs_review: Number(patch.summary.needs_review || 0),
+                                error: Number(patch.summary.error || 0),
+                                total: Number(patch.summary.total || 0),
+                            }
+                            : tab.audit.summary,
+                    };
+                });
+            }),
+
             setScale: (scale) => set((state) => {
-                state.scale = scale;
+                updateActiveTab(state, (tab) => {
+                    tab.scale = scale;
+                });
             }),
 
             setCurrentPage: (page) => set((state) => {
-                state.currentPage = page;
+                updateActiveTab(state, (tab) => {
+                    tab.currentPage = page;
+                });
             }),
 
             setHighlights: (chunks) => set((state) => {
-                state.highlights = chunks;
+                updateActiveTab(state, (tab) => {
+                    tab.highlights = chunks;
+                });
             }),
 
             addHighlight: (chunk) => set((state) => {
-                const exists = state.highlights.some(h => h.id === chunk.id);
-                if (!exists) {
-                    state.highlights.push(chunk);
-                }
+                updateActiveTab(state, (tab) => {
+                    const exists = tab.highlights.some((h) => h.id === chunk.id);
+                    if (!exists) {
+                        tab.highlights.push(chunk);
+                    }
+                });
             }),
 
             clearHighlights: () => set((state) => {
-                state.highlights = [];
+                updateActiveTab(state, (tab) => {
+                    tab.highlights = [];
+                });
             }),
 
-            // 消息操作
+            setViewMode: (mode) => set((state) => {
+                updateActiveTab(state, (tab) => {
+                    tab.viewMode = mode;
+                });
+            }),
+
+            setSelectedPages: (pages) => set((state) => {
+                updateActiveTab(state, (tab) => {
+                    tab.selectedPages = normalizeSelectedPages(pages);
+                });
+            }),
+
             addMessage: (message) => set((state) => {
-                state.messages.push(message);
+                updateActiveTab(state, (tab) => {
+                    tab.messages.push({
+                        ...message,
+                        timestamp: toDate(message.timestamp),
+                    });
+                });
+            }),
+
+            setMessages: (messages) => set((state) => {
+                updateActiveTab(state, (tab) => {
+                    tab.messages = normalizeMessages(messages);
+                });
             }),
 
             updateMessage: (id, updates) => set((state) => {
-                const idx = state.messages.findIndex(m => m.id === id);
-                if (idx !== -1) {
-                    Object.assign(state.messages[idx], updates);
-                }
+                updateActiveTab(state, (tab) => {
+                    const idx = tab.messages.findIndex((m) => m.id === id);
+                    if (idx === -1) return;
+                    const nextUpdates = { ...updates };
+                    if (nextUpdates.timestamp) {
+                        nextUpdates.timestamp = toDate(nextUpdates.timestamp);
+                    }
+                    Object.assign(tab.messages[idx], nextUpdates);
+                });
             }),
 
             appendToMessage: (id, text, refs) => set((state) => {
-                const idx = state.messages.findIndex(m => m.id === id);
-                if (idx !== -1) {
-                    state.messages[idx].content += text;
+                updateActiveTab(state, (tab) => {
+                    const idx = tab.messages.findIndex((m) => m.id === id);
+                    if (idx === -1) return;
+                    tab.messages[idx].content += text;
                     if (refs) {
-                        state.messages[idx].activeRefs = [
-                            ...new Set([...state.messages[idx].activeRefs, ...refs])
-                        ];
+                        tab.messages[idx].activeRefs = [...new Set([...tab.messages[idx].activeRefs, ...refs])];
                     }
-                }
+                });
             }),
 
             clearMessages: () => set((state) => {
-                state.messages = [];
+                updateActiveTab(state, (tab) => {
+                    tab.messages = [];
+                });
             }),
 
             setLoading: (loading) => set((state) => {
-                state.isLoading = loading;
+                updateActiveTab(state, (tab) => {
+                    tab.isLoading = loading;
+                });
             }),
 
-            // 配置
+            setRightPanelMode: (mode) => set((state) => {
+                updateActiveTab(state, (tab) => {
+                    tab.rightPanelMode = mode;
+                });
+            }),
+
             updateConfig: (config) => set((state) => {
                 Object.assign(state.config, config);
             }),
         })),
         {
             name: 'pdf-qa-storage',
-            partialize: (state) => ({
-                config: state.config,
-            }),
+            version: 3,
+            migrate: (persistedState: unknown) => {
+                if (!persistedState || typeof persistedState !== 'object') {
+                    return persistedState as DocumentState;
+                }
+
+                const state = persistedState as Partial<DocumentState>;
+                const rawTabs = state.tabsByDocId && typeof state.tabsByDocId === 'object'
+                    ? state.tabsByDocId
+                    : {};
+
+                const tabsByDocId: Record<string, TabState> = {};
+                Object.entries(rawTabs).forEach(([docId, tab]) => {
+                    const normalized = normalizeTabState(tab, docId);
+                    if (normalized) {
+                        tabsByDocId[docId] = normalized;
+                    }
+                });
+
+                if (Object.keys(tabsByDocId).length === 0 && state.currentDocument?.id) {
+                    tabsByDocId[state.currentDocument.id] = createTabState(state.currentDocument, state.pdfUrl || null);
+                    tabsByDocId[state.currentDocument.id].messages = normalizeMessages(state.messages || []);
+                    tabsByDocId[state.currentDocument.id].highlights = Array.isArray(state.highlights) ? state.highlights : [];
+                    tabsByDocId[state.currentDocument.id].viewMode = state.viewMode === 'grid' ? 'grid' : 'list';
+                    tabsByDocId[state.currentDocument.id].scale = Number(state.scale || 1);
+                    tabsByDocId[state.currentDocument.id].currentPage = Number(state.currentPage || 1);
+                    tabsByDocId[state.currentDocument.id].complianceResults = Array.isArray(state.complianceResults) ? state.complianceResults : [];
+                    tabsByDocId[state.currentDocument.id].complianceMarkdown = String(state.complianceMarkdown || '');
+                    tabsByDocId[state.currentDocument.id].complianceRequirements = String(state.complianceRequirements || '');
+                    tabsByDocId[state.currentDocument.id].audit = createDefaultAuditState();
+                    tabsByDocId[state.currentDocument.id].rightPanelMode = state.rightPanelMode === 'compliance'
+                        ? 'compliance'
+                        : state.rightPanelMode === 'audit'
+                            ? 'audit'
+                            : 'chat';
+                    tabsByDocId[state.currentDocument.id].selectedPages = normalizeSelectedPages(state.selectedPages);
+                    tabsByDocId[state.currentDocument.id].isLoading = Boolean(state.isLoading);
+                }
+
+                const tabsOrderSource = Array.isArray(state.tabsOrder) ? state.tabsOrder : Object.keys(tabsByDocId);
+                const tabsOrder = tabsOrderSource.filter((docId) => Boolean(tabsByDocId[docId]));
+                const activeDocId = state.activeDocId && tabsByDocId[state.activeDocId]
+                    ? state.activeDocId
+                    : tabsOrder[0] || null;
+
+                return {
+                    ...state,
+                    tabsByDocId,
+                    tabsOrder,
+                    activeDocId,
+                } as DocumentState;
+            },
+            partialize: (state) => {
+                const serializedTabs: Record<string, TabState> = {};
+                Object.entries(state.tabsByDocId).forEach(([docId, tab]) => {
+                    serializedTabs[docId] = {
+                        ...tab,
+                        pdfUrl: tab.pdfUrl && tab.pdfUrl.startsWith('blob:') ? null : tab.pdfUrl,
+                        selectedPages: normalizeSelectedPages(tab.selectedPages),
+                    };
+                });
+
+                return {
+                    config: state.config,
+                    tabsOrder: state.tabsOrder,
+                    tabsByDocId: serializedTabs,
+                    activeDocId: state.activeDocId,
+                };
+            },
+            onRehydrateStorage: () => (state) => {
+                if (!state) return;
+                setTimeout(() => {
+                    useDocumentStore.setState((current) => {
+                        const next = { ...current };
+                        syncActiveFromTabs(next as DocumentState);
+                        return next;
+                    });
+                }, 0);
+            },
         }
     )
 );

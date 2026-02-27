@@ -1,28 +1,87 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import type { VirtuosoHandle } from 'react-virtuoso';
 import { PageLayer } from './PageLayer';
+import { PageGridItem } from './PageGridItem';
 import { usePdfLoader } from '../../hooks/usePdfLoader';
 import type { PDFLoadResult } from '../../hooks/usePdfLoader';
-import { useDocumentStore } from '../../stores/documentStore';
+import { useDocumentStore, type PageOcrStatus, type TextChunk } from '../../stores/documentStore';
+import { useVectorSearch } from '../../hooks/useVectorSearch';
 import './PDFViewer.css';
 
 interface PDFViewerProps {
     pdfUrl?: string;
     pdfFile?: File;
+    onRecognizeQueued?: (docId: string) => void;
 }
 
-export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
+const EMPTY_HIGHLIGHTS: TextChunk[] = [];
+
+export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecognizeQueued }) => {
     const { loadingState, loadFromUrl, loadFromFile, cleanup } = usePdfLoader();
-    const { scale, setScale, currentPage, setCurrentPage, highlights } = useDocumentStore();
+    const { recognizePages } = useVectorSearch();
+
+    const scale = useDocumentStore((state) => state.scale);
+    const setScale = useDocumentStore((state) => state.setScale);
+    const currentPage = useDocumentStore((state) => state.currentPage);
+    const setCurrentPage = useDocumentStore((state) => state.setCurrentPage);
+    const highlights = useDocumentStore((state) => state.highlights);
+    const viewMode = useDocumentStore((state) => state.viewMode);
+    const setViewMode = useDocumentStore((state) => state.setViewMode);
+    const currentDocument = useDocumentStore((state) => state.currentDocument);
+    const updateDocumentOcrStatus = useDocumentStore((state) => state.updateDocumentOcrStatus);
+    const selectedPages = useDocumentStore((state) => state.selectedPages);
+    const setSelectedPages = useDocumentStore((state) => state.setSelectedPages);
+    const activeProgress = useDocumentStore((state) => state.activeProgress);
+    const setTabProgress = useDocumentStore((state) => state.setTabProgress);
+    const activeDocId = currentDocument?.id ?? '';
 
     const [pdfResult, setPdfResult] = useState<PDFLoadResult | null>(null);
+    const [pageStatuses, setPageStatuses] = useState<Record<number, PageOcrStatus>>({});
+
     const virtuosoRef = useRef<VirtuosoHandle>(null);
     const containerRef = useRef<HTMLDivElement>(null);
-    // Virtuoso 的实际滚动容器
     const scrollerRef = useRef<HTMLElement | Window | null>(null);
+    const prevScaleRef = useRef(scale);
+    const highlightsRevisionRef = useRef<Record<string, { revision: number; signature: string }>>({});
+    const manualGridRevisionRef = useRef<Record<string, number | null>>({});
 
-    // 加载PDF
+    const isRecognizing = activeProgress?.stage === 'ocr';
+    const highlightSignature = useMemo(
+        () => highlights
+            .map((chunk) => `${chunk.refId}:${chunk.page}:${chunk.bbox.x},${chunk.bbox.y},${chunk.bbox.w},${chunk.bbox.h}`)
+            .join('|'),
+        [highlights]
+    );
+
+    useEffect(() => {
+        if (currentDocument?.pageOcrStatus) {
+            setPageStatuses(currentDocument.pageOcrStatus);
+        }
+    }, [currentDocument]);
+
+    useEffect(() => {
+        if (!activeDocId) {
+            return;
+        }
+
+        const revisions = highlightsRevisionRef.current;
+        const current = revisions[activeDocId];
+        if (!current) {
+            revisions[activeDocId] = { revision: 1, signature: highlightSignature };
+            manualGridRevisionRef.current[activeDocId] = null;
+            return;
+        }
+
+        if (current.signature === highlightSignature) {
+            return;
+        }
+
+        current.revision += 1;
+        current.signature = highlightSignature;
+        manualGridRevisionRef.current[activeDocId] = null;
+    }, [activeDocId, highlightSignature]);
+
     useEffect(() => {
         const load = async () => {
             let result: PDFLoadResult | null = null;
@@ -43,111 +102,206 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
         };
     }, [pdfUrl, pdfFile, loadFromUrl, loadFromFile, cleanup]);
 
-    // 滚动到高亮位置并垂直居中
-    const scrollToHighlight = useCallback((pageNum: number, bbox: { x: number; y: number; w: number; h: number }) => {
-        // 先滚动到页面确保页面被渲染
+    const handlePageClick = useCallback((_event: React.MouseEvent, pageNumber: number) => {
+        const status = pageStatuses[pageNumber];
+        if (status === 'recognized' || status === 'processing') {
+            return;
+        }
+
+        const next = new Set(selectedPages);
+        if (next.has(pageNumber)) {
+            next.delete(pageNumber);
+        } else {
+            next.add(pageNumber);
+        }
+        setSelectedPages(Array.from(next));
+    }, [pageStatuses, selectedPages, setSelectedPages]);
+
+    const handleRecognize = useCallback(async () => {
+        if (!currentDocument || selectedPages.length === 0) return;
+
+        const pagesToRecognize = [...selectedPages].sort((a, b) => a - b);
+        const response = await recognizePages(currentDocument.id, pagesToRecognize);
+        if (!response) {
+            return;
+        }
+
+        const queued = Array.isArray(response.pages) ? response.pages : pagesToRecognize;
+        if (queued.length === 0) {
+            setSelectedPages([]);
+            return;
+        }
+
+        setSelectedPages([]);
+        const nextStatusMap = { ...pageStatuses };
+        queued.forEach((pageNum: number) => {
+            if (nextStatusMap[pageNum] !== 'recognized') {
+                nextStatusMap[pageNum] = 'processing';
+            }
+        });
+        setPageStatuses(nextStatusMap);
+        updateDocumentOcrStatus(
+            currentDocument.recognizedPages || [],
+            nextStatusMap as Record<number, PageOcrStatus>
+        );
+        setTabProgress(currentDocument.id, {
+            stage: 'ocr',
+            current: 0,
+            total: 100,
+            message: typeof response.message === 'string' ? response.message : '已加入后台 OCR 队列',
+            document_id: currentDocument.id,
+        });
+        onRecognizeQueued?.(currentDocument.id);
+    }, [
+        currentDocument,
+        selectedPages,
+        recognizePages,
+        setSelectedPages,
+        pageStatuses,
+        updateDocumentOcrStatus,
+        setTabProgress,
+        onRecognizeQueued,
+    ]);
+
+    const highlightsByPage = useMemo(() => {
+        const grouped = new Map<number, TextChunk[]>();
+        for (const chunk of highlights) {
+            const pageHighlights = grouped.get(chunk.page);
+            if (pageHighlights) {
+                pageHighlights.push(chunk);
+            } else {
+                grouped.set(chunk.page, [chunk]);
+            }
+        }
+        return grouped;
+    }, [highlights]);
+
+    const scrollToHighlight = useCallback((
+        pageNum: number,
+        bbox: { x: number; y: number; w: number; h: number },
+        smooth = true
+    ) => {
         virtuosoRef.current?.scrollToIndex({
             index: pageNum - 1,
             align: 'start',
             behavior: 'auto',
         });
 
-        // 使用多次尝试来确保能找到页面元素
-        const attemptScroll = (attempts: number) => {
-            if (attempts <= 0) return;
+        const attemptScroll = (attemptsLeft: number) => {
+            if (attemptsLeft <= 0) {
+                return;
+            }
 
-            requestAnimationFrame(() => {
-                // 获取 Virtuoso 的滚动容器
-                const scroller = scrollerRef.current;
-                if (!scroller || !(scroller instanceof HTMLElement)) {
-                    setTimeout(() => attemptScroll(attempts - 1), 50);
-                    return;
-                }
+            const scroller = scrollerRef.current;
+            if (!(scroller instanceof HTMLElement)) {
+                window.setTimeout(() => attemptScroll(attemptsLeft - 1), 32);
+                return;
+            }
 
-                // 查找目标页面
-                const pageElements = scroller.querySelectorAll('.page-wrapper');
-                let foundPage: HTMLElement | null = null;
+            const pageEl = scroller.querySelector<HTMLElement>(`.page-wrapper[data-page-number="${pageNum}"]`);
+            if (!pageEl) {
+                window.setTimeout(() => attemptScroll(attemptsLeft - 1), 48);
+                return;
+            }
 
-                // 遍历查找正确的页面
-                for (let i = 0; i < pageElements.length; i++) {
-                    const el = pageElements[i] as HTMLElement;
-                    const pageNumAttr = el.getAttribute('data-page-number');
-                    if (pageNumAttr && parseInt(pageNumAttr) === pageNum) {
-                        foundPage = el;
-                        break;
-                    }
-                }
+            const highlightCenterInPage = (bbox.y + bbox.h / 2) * scale;
+            const highlightCenterInContainer = pageEl.offsetTop + highlightCenterInPage;
+            const targetScrollTop = highlightCenterInContainer - scroller.clientHeight / 2;
 
-                if (!foundPage) {
-                    // 页面还没渲染，稍后重试
-                    setTimeout(() => attemptScroll(attempts - 1), 100);
-                    return;
-                }
-
-                // 计算高亮区域在页面中的位置
-                // 后端坐标是图像坐标系（原点在左上），与CSS坐标系相同
-                // 直接使用，不需要Y轴翻转
-                const highlightTopInPage = bbox.y * scale;
-                const highlightHeight = bbox.h * scale;
-                const highlightCenterInPage = highlightTopInPage + highlightHeight / 2;
-
-                // 计算高亮中心在滚动容器中的绝对位置
-                const pageTopInContainer = foundPage.offsetTop;
-                const highlightCenterInContainer = pageTopInContainer + highlightCenterInPage;
-
-                // 居中滚动
-                const containerHeight = scroller.clientHeight;
-                const targetScrollTop = highlightCenterInContainer - containerHeight / 2;
-
-                console.log('[PDFViewer] Scrolling to highlight:', {
-                    pageNum,
-                    bbox,
-                    highlightTopInPage,
-                    highlightCenterInPage,
-                    pageTopInContainer,
-                    highlightCenterInContainer,
-                    containerHeight,
-                    targetScrollTop,
-                });
-
-                scroller.scrollTo({
-                    top: Math.max(0, targetScrollTop),
-                    behavior: 'smooth'
-                });
+            scroller.scrollTo({
+                top: Math.max(0, targetScrollTop),
+                behavior: smooth ? 'smooth' : 'auto',
             });
         };
 
-        // 开始尝试滚动，最多尝试5次
-        setTimeout(() => attemptScroll(5), 100);
+        window.requestAnimationFrame(() => attemptScroll(6));
     }, [scale]);
 
-    // 处理高亮变化，自动滚动到高亮位置并居中
     useEffect(() => {
         if (highlights.length > 0 && pdfResult) {
-            const firstHighlight = highlights[0];
-            scrollToHighlight(firstHighlight.page, firstHighlight.bbox);
-        }
-    }, [highlights, pdfResult, scrollToHighlight]);
+            if (viewMode === 'grid') {
+                const currentRevision = highlightsRevisionRef.current[activeDocId]?.revision ?? 0;
+                const manualRevision = manualGridRevisionRef.current[activeDocId] ?? null;
+                if (manualRevision === currentRevision) {
+                    return;
+                }
+                setViewMode('list');
+                return;
+            }
 
-    // 缩放变化时，如果有高亮则重新居中
+            const firstHighlight = highlights[0];
+            scrollToHighlight(firstHighlight.page, firstHighlight.bbox, true);
+        }
+    }, [activeDocId, highlights, pdfResult, scrollToHighlight, viewMode, setViewMode]);
+
     useEffect(() => {
-        if (highlights.length > 0 && pdfResult) {
-            const firstHighlight = highlights[0];
-            // 延迟稍长一些，等待缩放渲染完成
-            const timer = setTimeout(() => {
-                scrollToHighlight(firstHighlight.page, firstHighlight.bbox);
-            }, 200);
-            return () => clearTimeout(timer);
-        }
-    }, [scale]);
+        const scaleChanged = prevScaleRef.current !== scale;
+        prevScaleRef.current = scale;
 
-    // 处理缩放
+        if (!scaleChanged) {
+            return;
+        }
+
+        if (highlights.length > 0 && pdfResult && viewMode === 'list') {
+            const firstHighlight = highlights[0];
+            const timer = window.setTimeout(() => {
+                scrollToHighlight(firstHighlight.page, firstHighlight.bbox, false);
+            }, 120);
+            return () => window.clearTimeout(timer);
+        }
+    }, [scale, highlights, pdfResult, scrollToHighlight, viewMode]);
+
     const handleZoom = useCallback((factor: number) => {
         const newScale = Math.max(0.5, Math.min(3, scale * factor));
         setScale(newScale);
     }, [scale, setScale]);
 
-    // 渲染加载状态
+    const handleViewModeChange = useCallback((mode: 'list' | 'grid') => {
+        if (mode === viewMode) {
+            return;
+        }
+
+        if (mode === 'grid' && highlights.length > 0 && activeDocId) {
+            const currentRevision = highlightsRevisionRef.current[activeDocId]?.revision ?? 0;
+            manualGridRevisionRef.current[activeDocId] = currentRevision;
+        }
+
+        setViewMode(mode);
+    }, [activeDocId, highlights.length, setViewMode, viewMode]);
+
+    const renderViewModeToggle = useCallback(() => (
+        <div className="view-mode-toggle" role="group" aria-label="页面浏览模式">
+            <button
+                type="button"
+                className={`view-mode-btn ${viewMode === 'list' ? 'is-active' : ''}`}
+                title="单页浏览"
+                aria-label="单页浏览"
+                aria-pressed={viewMode === 'list'}
+                onClick={() => handleViewModeChange('list')}
+            >
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <rect x="5" y="3.5" width="14" height="17" rx="1.8" stroke="currentColor" strokeWidth="1.8" />
+                    <path d="M8 8h8M8 12h8M8 16h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                </svg>
+            </button>
+            <button
+                type="button"
+                className={`view-mode-btn ${viewMode === 'grid' ? 'is-active' : ''}`}
+                title="网格浏览"
+                aria-label="网格浏览"
+                aria-pressed={viewMode === 'grid'}
+                onClick={() => handleViewModeChange('grid')}
+            >
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <rect x="4" y="4" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.8" />
+                    <rect x="13" y="4" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.8" />
+                    <rect x="4" y="13" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.8" />
+                    <rect x="13" y="13" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.8" />
+                </svg>
+            </button>
+        </div>
+    ), [handleViewModeChange, viewMode]);
+
     if (loadingState.isLoading) {
         return (
             <div className="pdf-loading">
@@ -168,17 +322,59 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
     if (!pdfResult) {
         return (
             <div className="pdf-placeholder">
-                <p>请上传PDF文件</p>
+                <p>请上传 PDF 文件</p>
+            </div>
+        );
+    }
+
+    if (viewMode === 'grid') {
+        const totalPages = pdfResult.numPages;
+        const thumbnails = currentDocument?.thumbnails || [];
+
+        return (
+            <div className="pdf-viewer" ref={containerRef}>
+                <div className="pdf-toolbar">
+                    {renderViewModeToggle()}
+                    <span className="selection-indicator">
+                        已选 {selectedPages.length} 页
+                    </span>
+                    <button
+                        className="ocr-run-btn"
+                        onClick={handleRecognize}
+                        disabled={isRecognizing || selectedPages.length === 0}
+                    >
+                        {isRecognizing ? '识别中...' : '识别选中页面'}
+                    </button>
+                    <span className="page-indicator">
+                        共 {totalPages} 页
+                    </span>
+                </div>
+
+                <div className="pdf-scroll-container pdf-grid-container">
+                    <div className="pdf-grid-list">
+                        {Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => (
+                            <div key={pageNum} className="pdf-grid-item-shell">
+                                <PageGridItem
+                                    pageNumber={pageNum}
+                                    thumbnail={thumbnails[pageNum - 1]}
+                                    status={pageStatuses[pageNum] || 'unrecognized'}
+                                    selected={selectedPages.includes(pageNum)}
+                                    onClick={handlePageClick}
+                                />
+                            </div>
+                        ))}
+                    </div>
+                </div>
             </div>
         );
     }
 
     return (
         <div className="pdf-viewer" ref={containerRef}>
-            {/* 工具栏 */}
             <div className="pdf-toolbar">
+                {renderViewModeToggle()}
                 <button onClick={() => handleZoom(0.8)} title="缩小">
-                    <span>−</span>
+                    <span>-</span>
                 </button>
                 <span className="zoom-level">{Math.round(scale * 100)}%</span>
                 <button onClick={() => handleZoom(1.25)} title="放大">
@@ -189,24 +385,23 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile }) => {
                 </span>
             </div>
 
-            {/* 虚拟滚动列表 */}
             <div className="pdf-scroll-container" style={{ flex: 1, overflow: 'hidden' }}>
                 <Virtuoso
                     ref={virtuosoRef}
                     scrollerRef={(ref) => { scrollerRef.current = ref; }}
                     style={{ height: '100%' }}
                     totalCount={pdfResult.numPages}
+                    initialTopMostItemIndex={Math.max(0, currentPage - 1)}
                     itemContent={(index) => (
                         <PageLayer
                             key={index}
                             pageNumber={index + 1}
                             scale={scale}
                             pdfResult={pdfResult}
-                            highlights={highlights.filter((h) => h.page === index + 1)}
+                            highlights={highlightsByPage.get(index + 1) || EMPTY_HIGHLIGHTS}
                         />
                     )}
                     rangeChanged={(range) => {
-                        // 更新当前页
                         setCurrentPage(range.startIndex + 1);
                     }}
                     overscan={2}

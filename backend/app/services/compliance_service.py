@@ -8,7 +8,13 @@ from app.services.llm_router import llm_router
 from app.models.schemas import TextChunk
 
 class ComplianceService:
-    async def verify_requirements(self, doc_id: str, requirements: List[str], api_key: str = None) -> Dict[str, Any]:
+    async def verify_requirements(
+        self,
+        doc_id: str,
+        requirements: List[str],
+        api_key: str = None,
+        allowed_pages: List[int] | None = None,
+    ) -> Dict[str, Any]:
         """
         验证多条技术要求
         返回: { results: [...], markdown: "表格字符串" }
@@ -16,7 +22,7 @@ class ComplianceService:
         results = []
         
         # 并发处理每一条要求
-        tasks = [self._verify_single_requirement(doc_id, req, api_key) for req in requirements]
+        tasks = [self._verify_single_requirement(doc_id, req, api_key, allowed_pages) for req in requirements]
         results = await asyncio.gather(*tasks)
         
         # 添加ID
@@ -142,11 +148,23 @@ class ComplianceService:
         
         return "\n".join(lines)
 
-    async def _verify_single_requirement(self, doc_id: str, requirement: str, api_key: str = None) -> Dict[str, Any]:
+    async def _verify_single_requirement(
+        self,
+        doc_id: str,
+        requirement: str,
+        api_key: str = None,
+        allowed_pages: List[int] | None = None,
+    ) -> Dict[str, Any]:
         """验证单条要求"""
         try:
             # 1. 检索相关文段
-            chunks = await rag_engine.retrieve(requirement, doc_id, top_k=10, api_key=api_key)
+            chunks = await rag_engine.retrieve(
+                requirement,
+                doc_id,
+                top_k=10,
+                api_key=api_key,
+                allowed_pages=allowed_pages,
+            )
             
             if not chunks:
                 return {

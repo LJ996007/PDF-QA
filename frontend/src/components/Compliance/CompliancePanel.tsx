@@ -2,11 +2,43 @@ import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useDocumentStore } from '../../stores/documentStore';
+import type { BoundingBox, TextChunk } from '../../stores/documentStore';
 import './CompliancePanel.css';
 
 interface CompliancePanelProps {
     className?: string;
 }
+
+type CompatTextChunk = TextChunk & {
+    page_number?: number;
+    ref_id?: string;
+};
+
+const createFallbackBbox = (page: number): BoundingBox => ({
+    page,
+    x: 0,
+    y: 0,
+    w: 100,
+    h: 20,
+});
+
+const getRefPage = (ref: CompatTextChunk): number | undefined => {
+    return ref.page_number ?? ref.bbox?.page ?? ref.page;
+};
+
+const getRefId = (ref: CompatTextChunk): string => {
+    return ref.refId || ref.ref_id || '';
+};
+
+const toHighlightRef = (ref: CompatTextChunk, page: number): TextChunk => {
+    return {
+        ...ref,
+        refId: getRefId(ref),
+        page,
+        bbox: ref.bbox ?? createFallbackBbox(page),
+        source: ref.source ?? 'native',
+    };
+};
 
 export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) => {
     const {
@@ -71,25 +103,15 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
         // 在 results 中查找对应页码的引用
         for (const item of complianceResults) {
             if (item.references && item.references.length > 0) {
-                for (const ref of item.references) {
+                for (const rawRef of item.references) {
+                    const ref: CompatTextChunk = rawRef;
                     console.log('[CompliancePanel] Checking ref:', ref);
                     // 后端返回的是序列化后的 TextChunk，字段名可能是 page_number 或通过 bbox.page
-                    const refPage = (ref as any).page_number || (ref as any).bbox?.page;
+                    const refPage = getRefPage(ref);
                     console.log('[CompliancePanel] refPage:', refPage, 'target:', pageNum);
                     if (refPage === pageNum) {
                         // 构建高亮对象
-                        const highlightRef = {
-                            ...ref,
-                            page: refPage,
-                            // 确保 bbox 格式正确
-                            bbox: (ref as any).bbox || {
-                                page: refPage,
-                                x: 0,
-                                y: 0,
-                                w: 100,
-                                h: 20
-                            }
-                        };
+                        const highlightRef = toHighlightRef(ref, refPage);
                         console.log('[CompliancePanel] Setting highlight:', highlightRef);
                         setHighlights([highlightRef]);
                         setCurrentPage(pageNum);
@@ -112,22 +134,18 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
         // 在所有 results 中查找对应 refId 的引用
         for (const item of complianceResults) {
             if (item.references && item.references.length > 0) {
-                for (const ref of item.references) {
+                for (const rawRef of item.references) {
+                    const ref: CompatTextChunk = rawRef;
                     // 兼容 ref_id (后端返回) 和 refId (前端定义)
-                    const currentRefId = (ref as any).ref_id || ref.refId;
+                    const currentRefId = getRefId(ref);
 
                     if (currentRefId === targetRefId) {
-                        const refPage = (ref as any).page_number || (ref as any).bbox?.page;
+                        const refPage = getRefPage(ref);
 
                         if (refPage) {
                             console.log('[CompliancePanel] Found matching ref:', ref);
                             // 构建高亮对象
-                            const highlightRef = {
-                                ...ref,
-                                page: refPage,
-                                // 确保使用正确的 bbox
-                                bbox: ref.bbox || (ref as any).bbox || { page: refPage, x: 0, y: 0, w: 100, h: 20 }
-                            };
+                            const highlightRef = toHighlightRef(ref, refPage);
                             setHighlights([highlightRef]);
                             setCurrentPage(refPage);
                             return;
