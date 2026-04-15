@@ -1,4 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import {
+    MULTIMODAL_PROVIDER_DEFAULTS,
+    getMultimodalDefaults,
+    type MultimodalProvider,
+} from '../../constants/multimodal';
 import { useDocumentStore } from '../../stores/documentStore';
 import './Settings.css';
 
@@ -12,21 +17,46 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
 
     const [zhipuKey, setZhipuKey] = useState(config.zhipuApiKey);
     const [deepseekKey, setDeepseekKey] = useState(config.deepseekApiKey);
-    const [dashscopeKey, setDashscopeKey] = useState(config.dashscopeApiKey || '');
-    const [qwenVlModel, setQwenVlModel] = useState(config.qwenVlModel || '');
+    const [multimodalProvider, setMultimodalProvider] = useState<MultimodalProvider>(config.multimodalProvider);
+    const [multimodalApiKey, setMultimodalApiKey] = useState(config.multimodalApiKey || '');
+    const [multimodalBaseUrl, setMultimodalBaseUrl] = useState(config.multimodalBaseUrl || getMultimodalDefaults(config.multimodalProvider).baseUrl);
+    const [multimodalModel, setMultimodalModel] = useState(config.multimodalModel || getMultimodalDefaults(config.multimodalProvider).model);
     const [ocrProvider] = useState<'baidu'>('baidu');
     const [baiduOcrUrl, setBaiduOcrUrl] = useState(config.baiduOcrUrl || '');
     const [baiduOcrToken, setBaiduOcrToken] = useState(config.baiduOcrToken || '');
 
     // 折叠状态
     const [isOcrExpanded, setIsOcrExpanded] = useState(false);
+    const [isMultimodalExpanded, setIsMultimodalExpanded] = useState(true);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        setZhipuKey(config.zhipuApiKey);
+        setDeepseekKey(config.deepseekApiKey);
+        setMultimodalProvider(config.multimodalProvider);
+        setMultimodalApiKey(config.multimodalApiKey || '');
+        setMultimodalBaseUrl(config.multimodalBaseUrl || getMultimodalDefaults(config.multimodalProvider).baseUrl);
+        setMultimodalModel(config.multimodalModel || getMultimodalDefaults(config.multimodalProvider).model);
+        setBaiduOcrUrl(config.baiduOcrUrl || '');
+        setBaiduOcrToken(config.baiduOcrToken || '');
+    }, [config, isOpen]);
+
+    const applyProviderTemplate = (provider: MultimodalProvider) => {
+        const defaults = getMultimodalDefaults(provider);
+        setMultimodalProvider(provider);
+        setMultimodalApiKey('');
+        setMultimodalBaseUrl(defaults.baseUrl);
+        setMultimodalModel(defaults.model);
+    };
 
     const handleSave = () => {
         updateConfig({
             zhipuApiKey: zhipuKey,
             deepseekApiKey: deepseekKey,
-            dashscopeApiKey: dashscopeKey,
-            qwenVlModel: qwenVlModel,
+            multimodalProvider,
+            multimodalApiKey: multimodalApiKey,
+            multimodalBaseUrl: multimodalBaseUrl,
+            multimodalModel: multimodalModel,
             ocrProvider: 'baidu',
             baiduOcrUrl: baiduOcrUrl,
             baiduOcrToken: baiduOcrToken,
@@ -63,13 +93,19 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                                 {ocrProvider === 'baidu' ? '🟠 百度 PP-OCR' : '🟢 智谱 GLM-4V'}
                             </span>
                         </div>
+                        <div className="config-item">
+                            <span className="config-label">多模态</span>
+                            <span className="config-value">
+                                {MULTIMODAL_PROVIDER_DEFAULTS[config.multimodalProvider].label} / {config.multimodalModel || getMultimodalDefaults(config.multimodalProvider).model}
+                            </span>
+                        </div>
                     </div>
 
                     {/* 智谱API Key */}
                     <div className="setting-group">
                         <label className="setting-label">
                             智谱API Key
-                            <span className="setting-hint">用于Embedding和LLM推理</span>
+                            <span className="setting-hint">用于 Embedding、文本问答；智谱多模态留空时也会复用这里的 Key</span>
                         </label>
                         <input
                             type="password"
@@ -95,34 +131,90 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                         />
                     </div>
 
-                    {/* OCR 设置 - 可折叠 */}
-                    <div className="setting-group">
-                        <label className="setting-label">
-                            DashScope API Key
-                            <span className="setting-hint">用于Qwen多模态专项审核（可选）</span>
-                        </label>
-                        <input
-                            type="password"
-                            className="setting-input"
-                            value={dashscopeKey}
-                            onChange={(e) => setDashscopeKey(e.target.value)}
-                            placeholder="sk-xxxxxxxx（可选）"
-                        />
-                    </div>
+                    <div className="setting-section">
+                        <button
+                            className="section-toggle"
+                            onClick={() => setIsMultimodalExpanded(!isMultimodalExpanded)}
+                        >
+                            <span className="section-title">
+                                🖼 多模态模型
+                                <span className="section-badge">
+                                    {MULTIMODAL_PROVIDER_DEFAULTS[multimodalProvider].label}
+                                </span>
+                            </span>
+                            <span className={`toggle-icon ${isMultimodalExpanded ? 'expanded' : ''}`}>
+                                ▶
+                            </span>
+                        </button>
 
-                    {/* 多模态模型名称 */}
-                    <div className="setting-group">
-                        <label className="setting-label">
-                            多模态模型名称
-                            <span className="setting-hint">留空则使用默认值 qwen-vl-max-latest</span>
-                        </label>
-                        <input
-                            type="text"
-                            className="setting-input"
-                            value={qwenVlModel}
-                            onChange={(e) => setQwenVlModel(e.target.value)}
-                            placeholder="qwen-vl-max-latest"
-                        />
+                        {isMultimodalExpanded && (
+                            <div className="section-content">
+                                <div className="setting-group">
+                                    <label className="setting-label">
+                                        供应商
+                                        <span className="setting-hint">智能问答和专项审查共用这套多模态配置</span>
+                                    </label>
+                                    <div className="provider-selector">
+                                        {(['zhipu', 'qwen', 'siliconflow'] as MultimodalProvider[]).map((provider) => (
+                                            <button
+                                                key={provider}
+                                                type="button"
+                                                className={`provider-btn ${multimodalProvider === provider ? 'active' : ''}`}
+                                                onClick={() => applyProviderTemplate(provider)}
+                                            >
+                                                {MULTIMODAL_PROVIDER_DEFAULTS[provider].label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="setting-group">
+                                    <label className="setting-label">
+                                        多模态 API Key
+                                        <span className="setting-hint">
+                                            {multimodalProvider === 'zhipu'
+                                                ? '留空时将自动复用上方智谱 API Key'
+                                                : '请输入当前供应商可用的多模态 API Key'}
+                                        </span>
+                                    </label>
+                                    <input
+                                        type="password"
+                                        className="setting-input"
+                                        value={multimodalApiKey}
+                                        onChange={(e) => setMultimodalApiKey(e.target.value)}
+                                        placeholder={multimodalProvider === 'zhipu' ? 'sk-xxxxxxxx（可留空复用智谱 Key）' : 'sk-xxxxxxxx'}
+                                    />
+                                </div>
+
+                                <div className="setting-group">
+                                    <label className="setting-label">
+                                        Base URL
+                                        <span className="setting-hint">切换供应商时会自动填入默认端点，也可手动覆盖</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        className="setting-input"
+                                        value={multimodalBaseUrl}
+                                        onChange={(e) => setMultimodalBaseUrl(e.target.value)}
+                                        placeholder={getMultimodalDefaults(multimodalProvider).baseUrl}
+                                    />
+                                </div>
+
+                                <div className="setting-group">
+                                    <label className="setting-label">
+                                        模型名称
+                                        <span className="setting-hint">可手动填写；默认会跟随供应商模板填入推荐模型</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        className="setting-input"
+                                        value={multimodalModel}
+                                        onChange={(e) => setMultimodalModel(e.target.value)}
+                                        placeholder={getMultimodalDefaults(multimodalProvider).model}
+                                    />
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                     <div className="setting-section">

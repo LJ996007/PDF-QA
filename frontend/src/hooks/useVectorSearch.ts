@@ -1,4 +1,5 @@
 import { useCallback } from 'react';
+import { resolveEffectiveMultimodalApiKey } from '../constants/multimodal';
 import { useDocumentStore } from '../stores/documentStore';
 import type {
     AuditProfile,
@@ -57,6 +58,10 @@ export interface MultimodalAuditJobCreateRequest {
     audit_profile_id: string;
     bidder_name: string;
     allowed_pages: number[];
+    multimodal_provider?: string;
+    multimodal_api_key?: string;
+    multimodal_base_url?: string;
+    multimodal_model?: string;
     api_key?: string;
     model?: string;
 }
@@ -254,6 +259,7 @@ export function useVectorSearch() {
 
     const apiOrigin = (config.apiBaseUrl || 'http://localhost:8000').replace(/\/$/, '');
     const API_BASE = `${apiOrigin}/api`;
+    const effectiveMultimodalApiKey = resolveEffectiveMultimodalApiKey(config);
 
     const askQuestion = useCallback(
         async (question: string, opts?: { useContext?: boolean; allowedPages?: number[]; useVision?: boolean }): Promise<void> => {
@@ -310,8 +316,10 @@ export function useVectorSearch() {
                         ...(opts?.useVision
                             ? {
                                   use_vision: true,
-                                  dashscope_api_key: config.dashscopeApiKey || undefined,
-                                  vision_model: config.qwenVlModel || undefined,
+                                  multimodal_provider: config.multimodalProvider,
+                                  multimodal_api_key: effectiveMultimodalApiKey || undefined,
+                                  multimodal_base_url: config.multimodalBaseUrl || undefined,
+                                  multimodal_model: config.multimodalModel || undefined,
                               }
                             : {}),
                     }),
@@ -396,6 +404,7 @@ export function useVectorSearch() {
             setHighlights,
             setLoading,
             API_BASE,
+            effectiveMultimodalApiKey,
         ]
     );
 

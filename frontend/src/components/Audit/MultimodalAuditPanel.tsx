@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { isMultimodalConfigured, resolveEffectiveMultimodalApiKey } from '../../constants/multimodal';
 import { useDocumentStore } from '../../stores/documentStore';
 import type { AuditProfile, MultimodalAuditItem, TextChunk } from '../../stores/documentStore';
 import type { AuditProfilePayload } from '../../hooks/useVectorSearch';
@@ -125,6 +126,8 @@ export const MultimodalAuditPanel: React.FC = () => {
     const currentDraft = audit.auditProfileDraft;
     const requiresBidderName = currentDraft?.bidderNameRequired || selectedSavedProfile?.bidderNameRequired || false;
     const isRunning = audit.progress?.status === 'queued' || audit.progress?.status === 'running';
+    const multimodalReady = isMultimodalConfigured(config);
+    const effectiveMultimodalApiKey = resolveEffectiveMultimodalApiKey(config);
 
     const isDraftDirty = useMemo(() => {
         if (!currentDraft) return false;
@@ -364,6 +367,10 @@ export const MultimodalAuditPanel: React.FC = () => {
             window.alert('请先选择已保存的审核模板');
             return;
         }
+        if (!multimodalReady) {
+            window.alert('请先在设置中配置可用的多模态模型后再启动专项审核。');
+            return;
+        }
 
         const bidderName = audit.bidderName.trim();
         if (requiresBidderName && !bidderName) {
@@ -391,8 +398,10 @@ export const MultimodalAuditPanel: React.FC = () => {
             audit_profile_id: selectedSavedProfile.id,
             bidder_name: bidderName,
             allowed_pages: allowedPages,
-            api_key: config.dashscopeApiKey || undefined,
-            model: config.qwenVlModel || undefined,
+            multimodal_provider: config.multimodalProvider,
+            multimodal_api_key: effectiveMultimodalApiKey || undefined,
+            multimodal_base_url: config.multimodalBaseUrl || undefined,
+            multimodal_model: config.multimodalModel || undefined,
         });
         if (!created) {
             setAuditState({

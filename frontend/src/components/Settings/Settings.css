@@ -14,7 +14,7 @@
 
 .settings-modal {
     width: 90%;
-    max-width: 420px;
+    max-width: 560px;
     max-height: 80vh;
     background: var(--bg-primary, #ffffff);
     border-radius: 16px;

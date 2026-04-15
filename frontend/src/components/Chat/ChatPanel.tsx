@@ -1,4 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
+import {
+    getMultimodalDefaults,
+    isMultimodalConfigured,
+    resolveEffectiveMultimodalApiKey,
+} from '../../constants/multimodal';
 import { useDocumentStore } from '../../stores/documentStore';
 import { useVectorSearch } from '../../hooks/useVectorSearch';
 import { MessageItem } from './MessageItem';
@@ -25,9 +30,12 @@ export const ChatPanel: React.FC = () => {
     const [inputValue, setInputValue] = useState('');
     const [pageFrom, setPageFrom] = useState('');
     const [pageTo, setPageTo] = useState('');
-    const [useVision, setUseVision] = useState(false);
+    const [useVision, setUseVision] = useState(true);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
+    const multimodalReady = isMultimodalConfigured(config);
+    const effectiveMultimodalApiKey = resolveEffectiveMultimodalApiKey(config);
+    const currentMultimodalLabel = getMultimodalDefaults(config.multimodalProvider).label;
 
     // 自动滚动到底部
     useEffect(() => {
@@ -57,7 +65,7 @@ export const ChatPanel: React.FC = () => {
         }
 
         try {
-            await askQuestion(question, { allowedPages, useVision });
+            await askQuestion(question, { allowedPages, useVision: useVision && multimodalReady });
         } catch (error) {
             console.error('问答错误:', error);
         }
@@ -177,18 +185,31 @@ export const ChatPanel: React.FC = () => {
                             )}
                         </div>
                     )}
-                    {currentDocument && config.dashscopeApiKey && (
-                        <label className="vision-toggle" title="使用 Qwen VL 视觉模型直接读取页面图像回答，适合表格、图片、扫描件">
+                    {currentDocument && (
+                        <label
+                            className={`vision-toggle ${!multimodalReady ? 'disabled' : ''}`}
+                            title={multimodalReady
+                                ? `使用 ${config.multimodalModel || '多模态模型'} 直接读取页面图像回答，适合表格、图片、扫描件`
+                                : '请先在设置中配置多模态模型'}
+                        >
                             <input
                                 type="checkbox"
                                 checked={useVision}
                                 onChange={(e) => setUseVision(e.target.checked)}
-                                disabled={isLoading}
+                                disabled={isLoading || !multimodalReady}
                             />
-                            <span>👁 视觉模型</span>
+                            <span>🖼 多模态回答</span>
                         </label>
                     )}
                 </div>
+                {currentDocument && !multimodalReady && (
+                    <div className="vision-config-hint">
+                        请先在设置中配置多模态模型。当前供应商为 {currentMultimodalLabel}，
+                        {config.multimodalBaseUrl && config.multimodalModel
+                            ? (effectiveMultimodalApiKey ? '参数已完整。' : '还缺少可用的 API Key。')
+                            : '还缺少 Base URL 或模型名。'}
+                    </div>
+                )}
                 {currentDocument && (
                     <div className="page-scope-summary">{pageScopeText}</div>
                 )}

@@ -1,6 +1,11 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { immer } from 'zustand/middleware/immer';
+import {
+    getMultimodalDefaults,
+    normalizeMultimodalProvider,
+    type MultimodalProvider,
+} from '../constants/multimodal';
 import type { PromptTemplate } from '../constants/prompts';
 import { createExamplePrompts } from '../constants/prompts';
 
@@ -137,8 +142,10 @@ export interface AppConfig {
     baiduOcrToken: string;
     ocrProvider: 'baidu';
     deepseekApiKey: string;
-    dashscopeApiKey: string;
-    qwenVlModel: string;
+    multimodalProvider: MultimodalProvider;
+    multimodalApiKey: string;
+    multimodalBaseUrl: string;
+    multimodalModel: string;
     theme: 'light' | 'dark';
     pdfScale: number;
     selectedPromptId: string;
@@ -183,8 +190,10 @@ const DEFAULT_CONFIG: AppConfig = {
     baiduOcrToken: '',
     ocrProvider: 'baidu',
     deepseekApiKey: '',
-    dashscopeApiKey: '',
-    qwenVlModel: '',
+    multimodalProvider: 'zhipu',
+    multimodalApiKey: '',
+    multimodalBaseUrl: getMultimodalDefaults('zhipu').baseUrl,
+    multimodalModel: getMultimodalDefaults('zhipu').model,
     theme: 'light',
     pdfScale: 1,
     selectedPromptId: '',
@@ -561,6 +570,46 @@ interface DocumentState {
     updateConfig: (config: Partial<AppConfig>) => void;
 }
 
+const normalizeStoredConfig = (rawConfig: any): AppConfig => {
+    const provider = normalizeMultimodalProvider(
+        rawConfig?.multimodalProvider
+        || ((rawConfig?.dashscopeApiKey || rawConfig?.qwenVlModel) ? 'qwen' : 'zhipu')
+    );
+    const providerDefaults = getMultimodalDefaults(provider);
+    const normalized = {
+        ...rawConfig,
+        multimodalProvider: provider,
+        multimodalApiKey: String(
+            rawConfig?.multimodalApiKey
+            || (provider === 'qwen' ? rawConfig?.dashscopeApiKey || '' : '')
+        ),
+        multimodalBaseUrl: String(rawConfig?.multimodalBaseUrl || providerDefaults.baseUrl),
+        multimodalModel: String(
+            rawConfig?.multimodalModel
+            || (provider === 'qwen' ? rawConfig?.qwenVlModel || providerDefaults.model : providerDefaults.model)
+        ),
+    };
+
+    if (normalized.customPrompts) {
+        normalized.customPrompts = normalized.customPrompts.map((p: any) => ({
+            id: p.id,
+            name: p.name,
+            description: p.description,
+            content: p.content,
+            createdAt: p.createdAt ? new Date(p.createdAt) : new Date(),
+            updatedAt: p.updatedAt ? new Date(p.updatedAt) : new Date(),
+        }));
+    }
+
+    if (!normalized?.customPrompts || normalized.customPrompts.length === 0) {
+        const examplePrompts = createExamplePrompts();
+        normalized.customPrompts = examplePrompts;
+        normalized.selectedPromptId = examplePrompts[0].id;
+    }
+
+    return { ...DEFAULT_CONFIG, ...normalized };
+};
+
 const initializeConfig = (): AppConfig => {
     const stored = localStorage.getItem('pdf-qa-storage');
 
@@ -585,25 +634,7 @@ const initializeConfig = (): AppConfig => {
                 customPrompts: examplePrompts,
             };
         }
-
-        if (config.customPrompts) {
-            config.customPrompts = config.customPrompts.map((p: any) => ({
-                id: p.id,
-                name: p.name,
-                description: p.description,
-                content: p.content,
-                createdAt: p.createdAt ? new Date(p.createdAt) : new Date(),
-                updatedAt: p.updatedAt ? new Date(p.updatedAt) : new Date(),
-            }));
-        }
-
-        if (!config?.customPrompts || config.customPrompts.length === 0) {
-            const examplePrompts = createExamplePrompts();
-            config.customPrompts = examplePrompts;
-            config.selectedPromptId = examplePrompts[0].id;
-        }
-
-        return { ...DEFAULT_CONFIG, ...config };
+        return normalizeStoredConfig(config);
     } catch (error) {
         console.error('解析本地配置失败:', error);
         const examplePrompts = createExamplePrompts();
@@ -1007,13 +1038,14 @@ export const useDocumentStore = create<DocumentState>()(
         })),
         {
             name: 'pdf-qa-storage',
-            version: 4,
+            version: 5,
             migrate: (persistedState: unknown) => {
                 if (!persistedState || typeof persistedState !== 'object') {
                     return persistedState as DocumentState;
                 }
 
                 const state = persistedState as Partial<DocumentState>;
+                const normalizedConfig = state.config ? normalizeStoredConfig(state.config) : initializeConfig();
                 const rawTabs = state.tabsByDocId && typeof state.tabsByDocId === 'object'
                     ? state.tabsByDocId
                     : {};
@@ -1055,6 +1087,7 @@ export const useDocumentStore = create<DocumentState>()(
 
                 return {
                     ...state,
+                    config: normalizedConfig,
                     tabsByDocId,
                     tabsOrder,
                     activeDocId,

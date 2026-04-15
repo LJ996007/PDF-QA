@@ -32,6 +32,7 @@ class MultimodalAuditService:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         provider_name: Optional[str] = None,
+        base_url: Optional[str] = None,
         progress_callback: Optional[ProgressCallback] = None,
     ) -> Dict[str, Any]:
         provider = get_multimodal_provider(provider_name)
@@ -52,6 +53,8 @@ class MultimodalAuditService:
             bidder_name=bidder_name,
             api_key=api_key,
             model=model,
+            provider_name=provider_name,
+            base_url=base_url,
             progress_callback=progress_callback,
         )
         items = self._aggregate_rule_results(enabled_rules, candidates)
@@ -145,6 +148,8 @@ class MultimodalAuditService:
         bidder_name: str,
         api_key: Optional[str],
         model: Optional[str],
+        provider_name: Optional[str],
+        base_url: Optional[str],
         progress_callback: Optional[ProgressCallback],
     ) -> List[Dict[str, Any]]:
         allowed_rule_ids = [rule["id"] for rule in enabled_rules]
@@ -174,6 +179,8 @@ class MultimodalAuditService:
                 json_schema=schema,
                 api_key=api_key,
                 model=model,
+                provider_name=provider_name,
+                base_url=base_url,
             )
             results = payload.get("results") if isinstance(payload, dict) else None
             if not isinstance(results, list):

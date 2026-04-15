@@ -1067,7 +1067,7 @@ async def enqueue_audit_job(doc_id: str, request: MultimodalAuditJobRequest, all
 
     job_id = f"audit_{uuid.uuid4().hex[:12]}"
     created_at = _now_iso_utc()
-    sanitized_request = request.model_copy(update={"api_key": None})
+    sanitized_request = request.model_copy(update={"api_key": None, "multimodal_api_key": None})
     audit_profile_snapshot = jsonable_encoder(audit_profile)
 
     audit_jobs[job_id] = {
@@ -1182,8 +1182,10 @@ async def run_audit_worker() -> None:
                 audit_profile=job.audit_profile_snapshot,
                 page_images=page_inputs,
                 bidder_name=job.request.bidder_name,
-                api_key=job.request.api_key,
-                model=job.request.model,
+                api_key=job.request.multimodal_api_key,
+                model=job.request.multimodal_model,
+                provider_name=job.request.multimodal_provider,
+                base_url=job.request.multimodal_base_url,
                 progress_callback=on_service_progress,
             )
 

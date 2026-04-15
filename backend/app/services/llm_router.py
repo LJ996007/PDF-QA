@@ -1,88 +1,111 @@
 """
-LLM路由服务 - DeepSeek推理
+LLM 路由服务，支持文本问答与共享问答提示词。
 """
-import httpx
-import os
+
+from __future__ import annotations
+
 import json
-from typing import AsyncGenerator, List, Dict, Any
+import os
+import re
+from typing import Any, AsyncGenerator, Dict, List, Optional
+
+import httpx
 
 from app.models.schemas import TextChunk
 
 
 class LLMRouter:
-    """LLM路由，支持DeepSeek和GLM-4"""
-    
+    """LLM 路由，支持 DeepSeek 和 GLM-4 文本问答。"""
+
     def __init__(self):
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "")
         self.zhipu_api_key = os.getenv("ZHIPU_API_KEY", "")
-    
+
+    def _build_context_blocks(self, chunks: List[TextChunk]) -> List[str]:
+        context_blocks: List[str] = []
+        for index, chunk in enumerate(chunks):
+            ref_id = chunk.ref_id or f"ref-{index + 1}"
+            context_blocks.append(f"[{ref_id}] (第{chunk.page_number}页)\n{chunk.content}")
+        return context_blocks
+
+    def _build_reference_catalog(self, references: List[Dict[str, Any]]) -> List[str]:
+        catalog: List[str] = []
+        for index, ref in enumerate(references):
+            ref_id = str(ref.get("ref_id") or f"ref-{index + 1}").strip()
+            page = int(ref.get("page") or 1)
+            content = str(ref.get("content") or "").strip()
+            if content:
+                catalog.append(f"[{ref_id}] 第{page}页：{content}")
+            else:
+                catalog.append(f"[{ref_id}] 第{page}页页面图像")
+        return catalog
+
+    def _build_answer_requirements(self) -> str:
+        return (
+            "回答要求：\n"
+            "1. 直接回答用户问题，可自然分段或按需列点，不要输出“逐项核对”“风险提示”“引用说明”等固定栏目。\n"
+            "2. 每一句事实性陈述后都必须紧跟至少一个 [ref-N]，且只能使用给定证据中的引用编号。\n"
+            "3. 如果现有证据不足，必须明确写：根据现有片段无法确认。\n"
+            "4. 不允许臆测，不允许虚构编号、页码或文档中不存在的信息。\n"
+            "5. 不要输出 JSON，不要追加与问题无关的模板化标题。"
+        )
+
     def _build_prompt(self, question: str, chunks: List[TextChunk]) -> str:
-        """构建带引用的Prompt"""
-        context_blocks = []
-        
-        for chunk in chunks:
-            ref_id = chunk.ref_id or f"ref-{chunks.index(chunk)+1}"
-            context_blocks.append(
-                f"[{ref_id}] (第{chunk.page_number}页)\n{chunk.content}"
-            )
-        
-        prompt = f"""你是一个严谨的文档问答助手。请仅基于给定文档片段作答，不得臆测。
+        context_text = "\n\n".join(self._build_context_blocks(chunks))
+        return (
+            "你是一个严谨的文档问答助手。请仅基于给定文档片段作答，不得臆测。\n\n"
+            "文档片段：\n"
+            "---\n"
+            f"{context_text}\n"
+            "---\n\n"
+            f"问题：{question}\n\n"
+            f"{self._build_answer_requirements()}"
+        )
 
-文档片段：
----
-{chr(10).join(context_blocks)}
----
+    def build_multimodal_prompt(
+        self,
+        *,
+        question: str,
+        references: List[Dict[str, Any]],
+        chunks: Optional[List[TextChunk]] = None,
+    ) -> str:
+        reference_catalog = "\n".join(self._build_reference_catalog(references))
+        context_appendix = ""
+        if chunks:
+            context_appendix = "\n\n补充文本片段：\n" + "\n\n".join(self._build_context_blocks(chunks))
+        return (
+            "你是一个严谨的文档问答助手。请同时结合页面图像和给定证据回答用户问题，不得臆测。\n\n"
+            "可用引用编号与证据：\n"
+            f"{reference_catalog or '当前没有可用引用。'}"
+            f"{context_appendix}\n\n"
+            f"问题：{question}\n\n"
+            f"{self._build_answer_requirements()}"
+        )
 
-问题：{question}
+    def extract_ref_ids(self, text: str) -> List[str]:
+        return [f"ref-{match}" for match in re.findall(r"\[ref-(\d+)\]", text or "")]
 
-请严格使用 Markdown 输出，并按以下四段结构回答（标题必须完全一致）：
-### 结论
-- 先给出一句最直接结论，并附引用 [ref-N]。
-
-### 逐项核对
-- 按“要点1 / 要点2 / 要点3 ...”逐条核对。
-- 每条都要写清楚证据和对应引用 [ref-N]。
-- 若问题包含多个对象（如多个证书/条款），必须逐一覆盖，不得遗漏。
-
-### 风险提示
-- 仅列出与证据相关的不确定性、时效性或缺失信息。
-- 若无明显风险，写“未发现额外风险”，并附引用 [ref-N]。
-
-### 引用说明
-- 用 1-2 句话说明引用覆盖范围，不新增事实。
-- 只使用上文出现过的 [ref-N]。
-
-硬性规则：
-1. 每句事实性陈述后都必须带 [ref-N]。
-2. 只允许使用给定文档片段中的引用编号，不得虚构编号。
-3. 若证据不足，明确写“根据现有片段无法确认”，并给出最接近的引用 [ref-N]。
-4. 不要输出 JSON，不要输出额外标题。"""
-        
-        return prompt
-    
     async def chat_stream(
-        self, 
-        question: str, 
+        self,
+        question: str,
         chunks: List[TextChunk],
         history: List[Dict] = None,
         zhipu_api_key: str = None,
-        deepseek_api_key: str = None
+        deepseek_api_key: str = None,
     ) -> AsyncGenerator[dict, None]:
         """
-        流式对话
+        流式对话。
         """
         prompt = self._build_prompt(question, chunks)
-        
+
         messages = []
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": prompt})
-        
-        # 使用传入的Key或环境变量
+
         deepseek_key = deepseek_api_key or self.deepseek_api_key
         zhipu_key = zhipu_api_key or self.zhipu_api_key
-        
-        # 优先使用DeepSeek
+
         if deepseek_key:
             async for chunk in self._deepseek_stream(messages, deepseek_key):
                 yield chunk
@@ -92,16 +115,16 @@ class LLMRouter:
         else:
             yield {
                 "type": "error",
-                "content": "未配置API Key，请设置DEEPSEEK_API_KEY或ZHIPU_API_KEY"
+                "content": "未配置API Key，请设置DEEPSEEK_API_KEY或ZHIPU_API_KEY",
             }
-    
+
     async def _deepseek_stream(self, messages: List[Dict], api_key: str) -> AsyncGenerator[dict, None]:
-        """DeepSeek流式调用"""
+        """DeepSeek 流式调用。"""
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        
+
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream(
                 "POST",
@@ -111,43 +134,40 @@ class LLMRouter:
                     "model": "deepseek-chat",
                     "messages": messages,
                     "stream": True,
-                    "max_tokens": 4096
-                }
+                    "max_tokens": 4096,
+                },
             ) as response:
                 response.raise_for_status()
-                
+
                 async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        data = line[6:]
-                        if data == "[DONE]":
-                            yield {"type": "done", "content": ""}
-                            break
-                        
-                        try:
-                            chunk_data = json.loads(data)
-                            delta = chunk_data["choices"][0].get("delta", {})
-                            content = delta.get("content", "")
-                            
-                            if content:
-                                # 提取引用标记
-                                import re
-                                refs = [f"ref-{m}" for m in re.findall(r'\[ref-(\d+)\]', content)]
-                                
-                                yield {
-                                    "type": "content",
-                                    "content": content,
-                                    "active_refs": refs
-                                }
-                        except (json.JSONDecodeError, KeyError):
-                            continue
-    
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        yield {"type": "done", "content": ""}
+                        break
+
+                    try:
+                        chunk_data = json.loads(data)
+                        delta = chunk_data["choices"][0].get("delta", {})
+                        content = delta.get("content", "")
+
+                        if content:
+                            yield {
+                                "type": "content",
+                                "content": content,
+                                "active_refs": self.extract_ref_ids(content),
+                            }
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+
     async def _zhipu_stream(self, messages: List[Dict], api_key: str) -> AsyncGenerator[dict, None]:
-        """智谱GLM-4流式调用"""
+        """智谱 GLM-4 流式调用。"""
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        
+
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream(
                 "POST",
@@ -157,108 +177,101 @@ class LLMRouter:
                     "model": "glm-4.7",
                     "messages": messages,
                     "stream": True,
-                    "max_tokens": 4096
-                }
+                    "max_tokens": 4096,
+                },
             ) as response:
                 response.raise_for_status()
-                
-                async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        data = line[6:]
-                        if data == "[DONE]":
-                            yield {"type": "done", "content": ""}
-                            break
-                        
-                        try:
-                            chunk_data = json.loads(data)
-                            delta = chunk_data["choices"][0].get("delta", {})
-                            content = delta.get("content", "")
-                            
-                            if content:
-                                import re
-                                refs = [f"ref-{m}" for m in re.findall(r'\[ref-(\d+)\]', content)]
-                                
-                                yield {
-                                    "type": "content",
-                                    "content": content,
-                                    "active_refs": refs
-                                }
-                        except (json.JSONDecodeError, KeyError):
-                            continue
 
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        yield {"type": "done", "content": ""}
+                        break
+
+                    try:
+                        chunk_data = json.loads(data)
+                        delta = chunk_data["choices"][0].get("delta", {})
+                        content = delta.get("content", "")
+
+                        if content:
+                            yield {
+                                "type": "content",
+                                "content": content,
+                                "active_refs": self.extract_ref_ids(content),
+                            }
+                    except (json.JSONDecodeError, KeyError):
+                        continue
 
     async def chat_completion(
-        self, 
-        messages: List[Dict], 
+        self,
+        messages: List[Dict],
         api_key: str = None,
-        json_mode: bool = False
+        json_mode: bool = False,
     ) -> Any:
-        """非流式对话，支持JSON模式"""
-        
-        # 优先使用DeepSeek
+        """非流式对话，支持 JSON 模式。"""
+
         deepseek_key = api_key or self.deepseek_api_key
         zhipu_key = api_key or self.zhipu_api_key
-        
+
         url = ""
         headers = {}
         payload = {}
-        
+
         if deepseek_key:
             url = "https://api.deepseek.com/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {deepseek_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             }
             payload = {
                 "model": "deepseek-chat",
                 "messages": messages,
                 "stream": False,
-                "max_tokens": 4096
+                "max_tokens": 4096,
             }
             if json_mode:
                 payload["response_format"] = {"type": "json_object"}
-                
+
         elif zhipu_key:
             url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
             headers = {
                 "Authorization": f"Bearer {zhipu_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             }
             payload = {
                 "model": "glm-4.7",
                 "messages": messages,
                 "stream": False,
-                "max_tokens": 4096
+                "max_tokens": 4096,
             }
         else:
-             raise Exception("API Key not configured")
+            raise Exception("API Key not configured")
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 url,
                 headers=headers,
-                json=payload
+                json=payload,
             )
             response.raise_for_status()
-            
-            # Return object similar to OpenAI response to keep interface consistent
             data = response.json()
-            
+
             class Message:
                 def __init__(self, content):
                     self.content = content
-            
+
             class Choice:
                 def __init__(self, content):
                     self.message = Message(content)
-            
+
             class Response:
                 def __init__(self, content):
                     self.choices = [Choice(content)]
-            
+
             content = data["choices"][0]["message"]["content"]
             return Response(content)
 
 
-# 全局实例
 llm_router = LLMRouter()

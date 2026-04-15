@@ -5,7 +5,7 @@ Pydantic data models.
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class BoundingBox(BaseModel):
@@ -104,8 +104,22 @@ class ChatRequest(BaseModel):
     deepseek_api_key: Optional[str] = None
     allowed_pages: List[int] = Field(default_factory=list)
     use_vision: bool = False
+    multimodal_provider: Optional[str] = None
+    multimodal_api_key: Optional[str] = None
+    multimodal_base_url: Optional[str] = None
+    multimodal_model: Optional[str] = None
     dashscope_api_key: Optional[str] = None
     vision_model: Optional[str] = None
+
+    @model_validator(mode="after")
+    def apply_multimodal_legacy_aliases(self):
+        if not self.multimodal_provider and self.dashscope_api_key:
+            self.multimodal_provider = "qwen"
+        if not self.multimodal_api_key and self.dashscope_api_key:
+            self.multimodal_api_key = self.dashscope_api_key
+        if not self.multimodal_model and self.vision_model:
+            self.multimodal_model = self.vision_model
+        return self
 
 
 class ChatReference(BaseModel):
@@ -212,8 +226,20 @@ class MultimodalAuditJobRequest(BaseModel):
     audit_profile_id: str
     bidder_name: str = ""
     allowed_pages: List[int] = Field(default_factory=list)
+    multimodal_provider: Optional[str] = None
+    multimodal_api_key: Optional[str] = None
+    multimodal_base_url: Optional[str] = None
+    multimodal_model: Optional[str] = None
     api_key: Optional[str] = None
     model: Optional[str] = None
+
+    @model_validator(mode="after")
+    def apply_multimodal_job_legacy_aliases(self):
+        if not self.multimodal_api_key and self.api_key:
+            self.multimodal_api_key = self.api_key
+        if not self.multimodal_model and self.model:
+            self.multimodal_model = self.model
+        return self
 
 
 class MultimodalAuditJobResponse(BaseModel):
