@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -11,9 +12,10 @@ from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from app.models.schemas import ChatRequest, TextChunk
-from app.routers.documents import documents, ensure_document_loaded
+from app.routers.documents import _build_page_image_inputs, documents, ensure_document_loaded
 from app.services.document_store import document_store
 from app.services.llm_router import llm_router
+from app.services.qwen_dashscope_provider import QwenDashScopeProvider
 from app.services.rag_engine import rag_engine
 
 router = APIRouter()
@@ -77,6 +79,7 @@ async def chat(request: ChatRequest):
         doc_id=doc_id,
         top_k=10,
         api_key=request.zhipu_api_key,
+        allowed_pages=request.allowed_pages if request.allowed_pages else None,
     )
 
     refs_data = [
@@ -107,19 +110,106 @@ async def chat(request: ChatRequest):
             "data": json.dumps({"type": "references", "refs": refs_data}),
         }
 
+        # 视觉模式：用 Qwen VL 直接看页面图像回答
+        if request.use_vision:
+            if request.allowed_pages:
+                pages_to_view = sorted(set(request.allowed_pages))
+            else:
+                pages_to_view = sorted({c.page_number for c in chunks}) or [1]
+
+            pages_to_view = pages_to_view[:10]
+
+            file_path = os.path.join("uploads", f"{doc_id}.pdf")
+            try:
+                page_inputs = _build_page_image_inputs(file_path, pages_to_view)
+            except Exception as exc:
+                yield {
+                    "event": "message",
+                    "data": json.dumps({"type": "error", "content": f"加载页面图像失败: {exc}"}),
+                }
+                return
+
+            vision_prompt = (
+                f"你是一名智能文档问答助手。请根据以下页面图像内容，回答用户的问题。\n"
+                f"用户问题：{request.question}\n"
+                f"请直接回答，内容要准确、完整。如遇表格请仔细读取每一行。"
+            )
+            try:
+                provider = QwenDashScopeProvider()
+                result = await provider.analyze_pages(
+                    images=page_inputs,
+                    prompt=vision_prompt,
+                    json_schema=None,
+                    api_key=request.dashscope_api_key,
+                    model=request.vision_model or None,
+                )
+                answer_text = result.get("answer") or result.get("text") or str(result)
+            except Exception as exc:
+                yield {
+                    "event": "message",
+                    "data": json.dumps({"type": "error", "content": f"视觉模型调用失败: {exc}"}),
+                }
+                return
+
+            try:
+                ts = datetime.now(timezone.utc).isoformat()
+                user_msg = {
+                    "id": f"user_{uuid.uuid4().hex[:12]}",
+                    "role": "user",
+                    "content": request.question,
+                    "timestamp": ts,
+                }
+                assistant_msg = {
+                    "id": f"assistant_{uuid.uuid4().hex[:12]}",
+                    "role": "assistant",
+                    "content": answer_text,
+                    "timestamp": ts,
+                    "references": refs_data,
+                }
+                document_store.append_chat(doc_id, user_msg, assistant_msg)
+            except Exception as exc:
+                print(f"[CHAT_STORE] Failed to persist vision chat: {exc}")
+
+            yield {
+                "event": "message",
+                "data": json.dumps({"type": "content", "text": answer_text, "active_refs": []}),
+            }
+            yield {
+                "event": "message",
+                "data": json.dumps({"type": "done", "final_refs": []}),
+            }
+            return
+
         # 检索不到内容时，不调用 LLM，避免空上下文幻觉。
         if not chunks:
             doc = documents.get(doc_id, {})
             ocr_pages = doc.get("ocr_required_pages") or []
+            indexed_chunks = int(doc.get("indexed_chunks") or doc.get("chunk_count") or 0)
+            recognized_pages = len(doc.get("recognized_pages") or [])
+            has_partial_index = indexed_chunks > 0 or recognized_pages > 0
 
-            hint = "未从该文档索引中检索到可用内容。"
-            if ocr_pages:
-                hint += (
-                    f" 该文件可能是扫描件，仍有 {len(ocr_pages)} 页需要 OCR。"
-                    " 请先配置 OCR 服务并重新识别。"
-                )
+            if has_partial_index:
+                hint = "当前问题在已建立的文档索引中未检索到匹配内容。"
+                if request.allowed_pages:
+                    hint += " 可尝试放宽页码范围，或换一个更接近原文的关键词再试。"
+                else:
+                    hint += " 可尝试换一个更接近原文的关键词，或限定到更相关的页码范围。"
+                if ocr_pages:
+                    hint += f" 当前仍有 {len(ocr_pages)} 页待 OCR，补齐后可进一步提升召回率。"
             else:
-                hint += " 请确认文档解析和索引流程已成功完成。"
+                hint = "未从该文档索引中检索到可用内容。"
+                if ocr_pages:
+                    hint += (
+                        f" 该文件可能是扫描件，仍有 {len(ocr_pages)} 页需要 OCR。"
+                        " 请先配置 OCR 服务并重新识别。"
+                    )
+                else:
+                    hint += " 请确认文档解析和索引流程已成功完成。"
+
+            if not has_partial_index and ocr_pages:
+                hint += (
+                    ""
+                )
 
             yield {
                 "event": "message",

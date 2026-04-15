@@ -38,115 +38,94 @@ class ComplianceService:
         }
     
     def _format_as_markdown(self, results: List[Dict[str, Any]]) -> str:
-        """将结果格式化为 Markdown 表格"""
+        """将结果格式化为 Markdown 表格 + 不符合项详情"""
         import re
-        
+
         status_map = {
             "satisfied": "✅ 符合",
-            "unsatisfied": "❌ 不符合", 
+            "unsatisfied": "❌ 不符合",
             "partial": "⚠️ 部分符合",
             "unknown": "❓ 未知",
             "error": "🔴 错误"
         }
-        
-        lines = [
-            "| 序号 | 技术要求 | 应答情况 | 状态 |",
-            "|:---:|:---|:---|:---:|"
-        ]
-        
+
         global_ref_cursor = 0
-        
+
+        # 第一遍：分配全局 ref_id，并为每个 item 构建 tag->global_id 映射
+        processed_items = []
         for item in results:
-            req = item.get('requirement', '')
             response = item.get('response', '')
-            status = status_map.get(item.get('status', 'unknown'), '❓ 未知')
-            
-            # 引用列表
+            gaps = item.get('gaps', '')
+            combined_text = response + " " + gaps
             refs = item.get('references', [])
-            
-            # 构建 block_id/ref_id 到 全局引用序号 的映射
-            # 全局序号从 1 开始累加
-            current_ref_map = {}
-            
+
+            # 分配全局 ref_id
             for idx, r in enumerate(refs):
-                global_id = global_ref_cursor + idx + 1
-                
-                # 更新 ref_id 为全局唯一ID，以便前端 handleRefClick 能找到它
-                # 注意：这会修改原始 TextChunk 对象
-                r.ref_id = f"ref-{global_id}"
-                
-                # 优先使用 block_id
-                if getattr(r, 'block_id', None):
-                    current_ref_map[f"[{r.block_id}]"] = global_id
-                    # 同时也映射裸ID
-                    current_ref_map[r.block_id] = global_id
-                
-                # 兼容 ref-N (后端生成的临时ID是 ref-1, ref-2...)
-                # 即使有 block_id，模型也可能偶尔用 ref-N，所以总是建立映射
-                local_ref_tag = f"ref-{idx + 1}"
-                current_ref_map[f"[{local_ref_tag}]"] = global_id
-                current_ref_map[local_ref_tag] = global_id
-            
-            # 更新全局游标
-            global_ref_cursor += len(refs)
+                r.ref_id = f"ref-{global_ref_cursor + idx + 1}"
 
-            # 替换 Response 中的引用标记
-            # 1. 替换 [bXXXX] -> [ref-GlobalID]
-            def replace_tag(match):
-                tag_content = match.group(1) # b0001 or ref-1
-                full_tag = f"[{tag_content}]"
-                
-                if full_tag in current_ref_map:
-                    return f"[ref-{current_ref_map[full_tag]}]"
-                
-                # 尝试直接匹配 block_id
-                if tag_content in current_ref_map:
-                    return f"[ref-{current_ref_map[tag_content]}]"
-                    
-                # 如果没找到映射（可能是 ref-N 对应关系复杂），尝试回退
-                # 此时 active_refs 和 tags 是顺序对应的
-                # 但正则匹配是按文本顺序，active_refs 是按 tag 排序...
-                # 简单起见，如果 response 中直接写了 [b0001]，我们希望能替换
-                
-                return match.group(0) # 保持原样
-
-            # 这里的 active_refs 是依据 sorted unique tags 生成的
-            # 如 response 有 [b0005] [b0001]
-            # unique sorted: [b0001], [b0005]
-            # active_refs: [chunk(b0001), chunk(b0005)]
-            # global_ids: start+1 -> b0001, start+2 -> b0005
-            
-            # 我们重新构建一个精确映射：
-            # 提取 response 中所有的 unique tags
-            ref_tags = re.findall(r'\[(b\d+|ref-\d+)\]', response)
+            # 提取合并文本中所有 unique tags，建立映射
+            ref_tags = re.findall(r'\[(b\d+|ref-\d+)\]', combined_text)
             unique_tags = sorted(list(set(ref_tags)))
-            
-            # 理论上 len(unique_tags) == len(refs)
+
             tag_to_global_id = {}
             for i, tag in enumerate(unique_tags):
                 if i < len(refs):
-                     # 计算 global ID
-                     # 该 item 的 refs 起始 global id 是 global_ref_cursor - len(refs) + 1
-                     # refs[i] 对应 unique_tags[i]
-                     # 所以 unique_tags[i] 对应的 global_id 是 (global_ref_cursor - len(refs) + 1) + i
-                     gid = (global_ref_cursor - len(refs)) + 1 + i
-                     tag_to_global_id[tag] = gid
-            
-            def replace_precise(match):
-                tag = match.group(1)
-                if tag in tag_to_global_id:
-                    return f"[ref-{tag_to_global_id[tag]}]"
-                return match.group(0)
-            
-            response = re.sub(r'\[(b\d+|ref-\d+)\]', replace_precise, response)
-            
-            # 转义表格中的管道符
-            req = req.replace('|', '\\|')
-            response = response.replace('|', '\\|')
-            
-            lines.append(f"| {item['id']} | {req} | {response} | {status} |")
-        
-        return "\n".join(lines)
+                    gid = global_ref_cursor + 1 + i
+                    tag_to_global_id[tag] = gid
+
+            global_ref_cursor += len(refs)
+
+            def make_replacer(mapping):
+                def replace_precise(match):
+                    tag = match.group(1)
+                    if tag in mapping:
+                        return f"[ref-{mapping[tag]}]"
+                    return match.group(0)
+                return replace_precise
+
+            replacer = make_replacer(tag_to_global_id)
+
+            # 替换两个字段中的引用标记
+            response_replaced = re.sub(r'\[(b\d+|ref-\d+)\]', replacer, response)
+            gaps_replaced = re.sub(r'\[(b\d+|ref-\d+)\]', replacer, gaps)
+
+            processed_items.append({
+                **item,
+                'response_fmt': response_replaced,
+                'gaps_fmt': gaps_replaced,
+            })
+
+        # 第一部分：总览表格
+        table_lines = [
+            "| 序号 | 技术要求 | 应答情况 | 状态 |",
+            "|:---:|:---|:---|:---:|"
+        ]
+
+        for item in processed_items:
+            req = item.get('requirement', '').replace('|', '\\|')
+            # 清除残余换行，确保表格每行只有一行文字
+            response_cell = item['response_fmt'].replace('\n', ' ').strip().replace('|', '\\|')
+            status = status_map.get(item.get('status', 'unknown'), '❓ 未知')
+            table_lines.append(f"| {item['id']} | {req} | {response_cell} | {status} |")
+
+        parts = ["\n".join(table_lines)]
+
+        # 第二部分：不符合 / 部分符合 详情
+        problem_items = [i for i in processed_items if i.get('status') in ('unsatisfied', 'partial')]
+
+        if problem_items:
+            detail_lines = ["\n---\n## ❌ 不符合 / ⚠️ 部分符合 说明\n"]
+            for item in problem_items:
+                req = item.get('requirement', '')
+                gaps_text = item.get('gaps_fmt', '').strip()
+                detail_lines.append(f"### {item['id']}. {req}\n")
+                if gaps_text:
+                    detail_lines.append(f"**缺失/问题：** {gaps_text}\n")
+                else:
+                    detail_lines.append(f"**缺失/问题：** {item['response_fmt'].strip()}\n")
+            parts.append("\n".join(detail_lines))
+
+        return "\n".join(parts)
 
     async def _verify_single_requirement(
         self,
@@ -157,13 +136,14 @@ class ComplianceService:
     ) -> Dict[str, Any]:
         """验证单条要求"""
         try:
-            # 1. 检索相关文段
+            # 1. 检索相关文段（top_k=15 + 上下文扩展，减少段落被切断的漏判）
             chunks = await rag_engine.retrieve(
                 requirement,
                 doc_id,
-                top_k=10,
+                top_k=15,
                 api_key=api_key,
                 allowed_pages=allowed_pages,
+                expand_context=True,
             )
             
             if not chunks:
@@ -181,11 +161,7 @@ class ComplianceService:
                 
             context = "\n\n".join([f"[{get_cid(c, i)}] (第{c.page_number}页) {c.content}" for i, c in enumerate(chunks)])
             
-            prompt = f"""你是一个技术文件核对专家。请根据以下文档片段，判断是否能够支撑技术要求。
-
-判断标准：
-1. 直接满足：文档中存在与技术要求完全一致的表述。
-2. 分析满足：虽然没有完全一致的表述，但通过分析文档内容（如数据范围包含、单位换算、逻辑推断等），可以明确确认满足技术要求。
+            prompt = f"""你是一个技术文件核对专家。请根据以下文档片段，判断是否支撑技术要求。
 
 技术要求：{requirement}
 
@@ -194,12 +170,13 @@ class ComplianceService:
 {context}
 ---
 
-请JSON格式返回结果：
+请以JSON格式返回（所有字段值不得含有换行符 \\n）：
 {{
     "status": "satisfied" | "unsatisfied" | "partial" | "unknown",
-    "reason": "简要说明理由。如果是通过分析确认满足，请在理由中说明推导逻辑。务必引用支持的段落编号（如[b0001]或[ref-1]），如果涉及多个片段，请全部列出。"
+    "summary": "一句话结论，不超过60字，引用关键段落如[b0001]或[ref-1]",
+    "gaps": "仅当 status 为 unsatisfied 或 partial 时填写：列出具体缺失内容及依据（引用段落），satisfied/unknown 时填空字符串"
 }}
-注意：状态必须是 strictly satisfied/unsatisfied/partial/unknown 之一。
+注意：status 必须严格为 satisfied/unsatisfied/partial/unknown 之一。
 """
             
             messages = [{"role": "user", "content": prompt}]
@@ -218,34 +195,31 @@ class ComplianceService:
             result_data = json.loads(content)
             
             status = result_data.get("status", "unknown")
-            reason = result_data.get("reason", "无法判断")
-            
-            # 提取引用
-            active_refs = []
-            
-            # 提取reason中的引用标记: [b0001], [ref-1]
-            # 匹配 [bXXXX] 或 [ref-N]
-            ref_tags = re.findall(r'\[(b\d+|ref-\d+)\]', reason)
+            summary = result_data.get("summary", result_data.get("reason", "无法判断"))
+            gaps = result_data.get("gaps", "")
+
+            # 从 summary + gaps 合并文本中提取引用
+            combined = summary + " " + gaps
+            ref_tags = re.findall(r'\[(b\d+|ref-\d+)\]', combined)
             unique_tags = sorted(list(set(ref_tags)))
-            
+
             # 建立映射: block_id -> chunk, ref-id -> chunk
             chunk_map = {}
             for i, c in enumerate(chunks):
                 if c.block_id:
                     chunk_map[c.block_id] = c
                 chunk_map[f"ref-{i+1}"] = c
-            
+
+            active_refs = []
             for tag in unique_tags:
                 if tag in chunk_map:
                     active_refs.append(chunk_map[tag])
-            
-            # 如果LLM没引用但确实satisfied，也许应该把top1 ref加上？
-            # 暂时只信任LLM的引用
-            
+
             return {
                 "requirement": requirement,
                 "status": status,
-                "response": reason,
+                "response": summary,
+                "gaps": gaps,
                 "references": active_refs
             }
             

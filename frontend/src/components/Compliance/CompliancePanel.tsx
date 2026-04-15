@@ -59,6 +59,8 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
 
     // 移除本地 state，改用 store state
     const [loading, setLoading] = useState(false);
+    // 有历史结果时默认折叠，否则展开
+    const [inputCollapsed, setInputCollapsed] = useState(!!complianceMarkdown);
 
     const handleCheck = async () => {
         if (!currentDocumentId || !complianceRequirements.trim()) return;
@@ -85,6 +87,7 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
 
             // 更新到 store
             setComplianceResults(data.results || data, data.markdown || '');
+            setInputCollapsed(true);
         } catch (error) {
             console.error(error);
             alert('检查失败，请重试');
@@ -160,20 +163,32 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
     return (
         <div className={`compliance-panel ${className || ''}`}>
             <div className="input-section">
-                <textarea
-                    className="req-input"
-                    placeholder="请输入技术要求，每行一条..."
-                    value={complianceRequirements}
-                    onChange={(e) => setComplianceRequirements(e.target.value)}
-                    disabled={loading}
-                />
-                <button
-                    className="check-btn"
-                    onClick={handleCheck}
-                    disabled={loading || !currentDocumentId}
+                {/* 折叠标题行 —— 始终可见 */}
+                <div
+                    className="input-section-header"
+                    onClick={() => setInputCollapsed(v => !v)}
                 >
-                    {loading ? '正在检查...' : '开始合规性检查'}
-                </button>
+                    <span className="input-section-title">技术要求输入</span>
+                    <span className={`input-collapse-icon ${inputCollapsed ? 'collapsed' : ''}`}>▾</span>
+                </div>
+
+                {/* 可折叠内容区 */}
+                <div className={`input-section-body ${inputCollapsed ? 'input-section-body--collapsed' : ''}`}>
+                    <textarea
+                        className="req-input"
+                        placeholder="请输入技术要求，每行一条..."
+                        value={complianceRequirements}
+                        onChange={(e) => setComplianceRequirements(e.target.value)}
+                        disabled={loading}
+                    />
+                    <button
+                        className="check-btn"
+                        onClick={handleCheck}
+                        disabled={loading || !currentDocumentId}
+                    >
+                        {loading ? '正在检查...' : '开始合规性检查'}
+                    </button>
+                </div>
             </div>
 
             <div className="results-section markdown-result">

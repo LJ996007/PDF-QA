@@ -1,9 +1,11 @@
 import { useCallback } from 'react';
 import { useDocumentStore } from '../stores/documentStore';
 import type {
-    AuditType,
+    AuditProfile,
+    AuditProfileRule,
     ChatMessage,
     ComplianceItem,
+    LegacyAuditType,
     MultimodalAuditItem,
     MultimodalAuditSummary,
     TextChunk,
@@ -52,10 +54,9 @@ export interface HistoryDocumentItem {
 }
 
 export interface MultimodalAuditJobCreateRequest {
-    audit_type: AuditType;
+    audit_profile_id: string;
     bidder_name: string;
     allowed_pages: number[];
-    custom_checks: string[];
     api_key?: string;
     model?: string;
 }
@@ -81,10 +82,90 @@ export interface MultimodalAuditJobResult {
     jobId: string;
     status: 'queued' | 'running' | 'completed' | 'failed';
     generatedAt: string;
-    auditType: AuditType;
+    auditProfileId: string;
+    auditProfileName: string;
+    auditProfileSnapshot: AuditProfile | null;
+    legacyAuditType: LegacyAuditType | '';
     items: MultimodalAuditItem[];
     summary: MultimodalAuditSummary;
 }
+
+export interface AuditProfilePayload {
+    name: string;
+    bidder_name_required: boolean;
+    rules: Array<{
+        id: string;
+        title: string;
+        instruction: string;
+        enabled: boolean;
+    }>;
+}
+
+const getErrorMessageFromPayload = (payload: unknown): string => {
+    if (!payload || typeof payload !== 'object') return '';
+
+    const detail = (payload as { detail?: unknown }).detail;
+    if (typeof detail === 'string' && detail.trim()) {
+        return detail.trim();
+    }
+    if (Array.isArray(detail)) {
+        const parts = detail
+            .map((item) => {
+                if (typeof item === 'string') return item.trim();
+                if (item && typeof item === 'object' && 'msg' in item) {
+                    return String((item as { msg?: unknown }).msg || '').trim();
+                }
+                return '';
+            })
+            .filter(Boolean);
+        if (parts.length > 0) {
+            return parts.join('；');
+        }
+    }
+
+    const message = (payload as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) {
+        return message.trim();
+    }
+    return '';
+};
+
+const readApiErrorMessage = async (response: Response, fallback: string): Promise<string> => {
+    const contentType = response.headers.get('content-type') || '';
+
+    if (contentType.includes('application/json')) {
+        try {
+            const payload = await response.json();
+            const message = getErrorMessageFromPayload(payload);
+            if (message) {
+                return message;
+            }
+        } catch {
+            // Fall through to text parsing.
+        }
+    }
+
+    try {
+        const text = (await response.text()).trim();
+        if (!text) {
+            return fallback;
+        }
+
+        try {
+            const payload = JSON.parse(text);
+            const message = getErrorMessageFromPayload(payload);
+            if (message) {
+                return message;
+            }
+        } catch {
+            // Plain-text error body.
+        }
+
+        return text;
+    } catch {
+        return fallback;
+    }
+};
 
 const mapAuditReferenceToChunk = (docId: string, ref: any, index: number): TextChunk => {
     const page = Number(ref?.page || ref?.bbox?.page || 1);
@@ -114,6 +195,51 @@ const mapAuditItem = (docId: string, item: any, idx: number): MultimodalAuditIte
     };
 };
 
+const mapAuditProfileRule = (rule: any, index: number): AuditProfileRule | null => {
+    if (!rule || typeof rule !== 'object') return null;
+    const title = String(rule?.title || '').trim();
+    const instruction = String(rule?.instruction || '').trim();
+    if (!title || !instruction) return null;
+    return {
+        id: String(rule?.id || `rule_${index + 1}`),
+        title,
+        instruction,
+        enabled: rule?.enabled !== false,
+    };
+};
+
+const mapAuditProfile = (profile: any): AuditProfile | null => {
+    if (!profile || typeof profile !== 'object') return null;
+    const rulesRaw = Array.isArray(profile?.rules) ? profile.rules : [];
+    const rules = rulesRaw
+        .map((rule: any, index: number) => mapAuditProfileRule(rule, index))
+        .filter((rule: AuditProfileRule | null): rule is AuditProfileRule => Boolean(rule));
+    const id = String(profile?.id || '').trim();
+    const name = String(profile?.name || '').trim();
+    if (!id || !name || rules.length === 0) return null;
+    return {
+        id,
+        name,
+        bidderNameRequired: Boolean(profile?.bidder_name_required ?? profile?.bidderNameRequired),
+        rules,
+        createdAt: String(profile?.created_at || profile?.createdAt || ''),
+        updatedAt: String(profile?.updated_at || profile?.updatedAt || ''),
+    };
+};
+
+const mapAuditSummary = (summaryRaw: any, itemCount: number): MultimodalAuditSummary => ({
+    pass: Number(summaryRaw?.pass || 0),
+    fail: Number(summaryRaw?.fail || 0),
+    needs_review: Number(summaryRaw?.needs_review || 0),
+    error: Number(summaryRaw?.error || 0),
+    total: Number(summaryRaw?.total || itemCount),
+});
+
+const mapLegacyAuditType = (value: unknown): LegacyAuditType | '' =>
+    value === 'contract' || value === 'certificate' || value === 'personnel'
+        ? value
+        : '';
+
 export function useVectorSearch() {
     const {
         currentDocument,
@@ -130,7 +256,7 @@ export function useVectorSearch() {
     const API_BASE = `${apiOrigin}/api`;
 
     const askQuestion = useCallback(
-        async (question: string, opts?: { useContext?: boolean }): Promise<void> => {
+        async (question: string, opts?: { useContext?: boolean; allowedPages?: number[]; useVision?: boolean }): Promise<void> => {
             if (!currentDocument) {
                 throw new Error('未打开任何文档');
             }
@@ -178,6 +304,16 @@ export function useVectorSearch() {
                         history: historyPayload,
                         zhipu_api_key: config.zhipuApiKey,
                         deepseek_api_key: config.deepseekApiKey,
+                        ...(opts?.allowedPages && opts.allowedPages.length > 0
+                            ? { allowed_pages: opts.allowedPages }
+                            : {}),
+                        ...(opts?.useVision
+                            ? {
+                                  use_vision: true,
+                                  dashscope_api_key: config.dashscopeApiKey || undefined,
+                                  vision_model: config.qwenVlModel || undefined,
+                              }
+                            : {}),
                     }),
                 });
 
@@ -264,7 +400,7 @@ export function useVectorSearch() {
     );
 
     const uploadDocument = useCallback(
-        async (file: File, ocrMode: 'manual' | 'full' = 'manual'): Promise<string | null> => {
+        async (file: File, ocrMode: 'manual' | 'full' = 'manual'): Promise<string> => {
             const formData = new FormData();
             formData.append('file', file);
             formData.append('ocr_mode', ocrMode);
@@ -288,17 +424,27 @@ export function useVectorSearch() {
                 });
 
                 if (!response.ok) {
-                    throw new Error('上传失败');
+                    const message = await readApiErrorMessage(response, '上传失败');
+                    throw new Error(message);
                 }
 
                 const data = await response.json();
-                return data.document_id;
+                if (!data?.document_id) {
+                    throw new Error('上传接口未返回文档 ID');
+                }
+                return String(data.document_id);
             } catch (error) {
                 console.error('上传错误:', error);
-                return null;
+                if (error instanceof TypeError) {
+                    throw new Error(`无法连接后端，请确认 ${apiOrigin} 已启动`);
+                }
+                if (error instanceof Error) {
+                    throw error;
+                }
+                throw new Error('上传失败');
             }
         },
-        [config, API_BASE]
+        [config, API_BASE, apiOrigin]
     );
 
     const getDocument = useCallback(
@@ -525,6 +671,75 @@ export function useVectorSearch() {
         [API_BASE]
     );
 
+    const getAuditProfiles = useCallback(async (): Promise<AuditProfile[]> => {
+        try {
+            const resp = await fetch(`${apiOrigin}/api/audit_profiles`);
+            if (!resp.ok) {
+                throw new Error(await readApiErrorMessage(resp, '加载审核模板失败'));
+            }
+            const data = await resp.json();
+            const profilesRaw = Array.isArray(data) ? data : [];
+            return profilesRaw
+                .map((profile: any) => mapAuditProfile(profile))
+                .filter((profile: AuditProfile | null): profile is AuditProfile => Boolean(profile));
+        } catch (error) {
+            console.error('加载审核模板错误:', error);
+            throw error instanceof Error ? error : new Error('加载审核模板失败');
+        }
+    }, [apiOrigin]);
+
+    const createAuditProfile = useCallback(
+        async (payload: AuditProfilePayload): Promise<AuditProfile> => {
+            const resp = await fetch(`${apiOrigin}/api/audit_profiles`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                throw new Error(await readApiErrorMessage(resp, '创建审核模板失败'));
+            }
+            const data = await resp.json();
+            const mapped = mapAuditProfile(data);
+            if (!mapped) {
+                throw new Error('审核模板返回数据无效');
+            }
+            return mapped;
+        },
+        [apiOrigin]
+    );
+
+    const updateAuditProfile = useCallback(
+        async (profileId: string, payload: AuditProfilePayload): Promise<AuditProfile> => {
+            const resp = await fetch(`${apiOrigin}/api/audit_profiles/${encodeURIComponent(profileId)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                throw new Error(await readApiErrorMessage(resp, '保存审核模板失败'));
+            }
+            const data = await resp.json();
+            const mapped = mapAuditProfile(data);
+            if (!mapped) {
+                throw new Error('审核模板返回数据无效');
+            }
+            return mapped;
+        },
+        [apiOrigin]
+    );
+
+    const deleteAuditProfile = useCallback(
+        async (profileId: string): Promise<void> => {
+            const resp = await fetch(`${apiOrigin}/api/audit_profiles/${encodeURIComponent(profileId)}`, {
+                method: 'DELETE',
+            });
+            if (!resp.ok) {
+                throw new Error(await readApiErrorMessage(resp, '删除审核模板失败'));
+            }
+        },
+        [apiOrigin]
+    );
+
     const createMultimodalAuditJob = useCallback(
         async (docId: string, payload: MultimodalAuditJobCreateRequest): Promise<MultimodalAuditJobCreateResponse | null> => {
             try {
@@ -534,8 +749,7 @@ export function useVectorSearch() {
                     body: JSON.stringify(payload),
                 });
                 if (!resp.ok) {
-                    const text = await resp.text();
-                    throw new Error(text || '创建专项审查任务失败');
+                    throw new Error(await readApiErrorMessage(resp, '创建专项审查任务失败'));
                 }
                 return await resp.json();
             } catch (e) {
@@ -579,15 +793,9 @@ export function useVectorSearch() {
                 const data = await resp.json();
                 const itemsRaw = Array.isArray(data?.items) ? data.items : [];
                 const mappedItems = itemsRaw.map((item: any, idx: number) => mapAuditItem(docId, item, idx));
-
-                const summaryRaw = data?.summary || {};
-                const summary: MultimodalAuditSummary = {
-                    pass: Number(summaryRaw.pass || 0),
-                    fail: Number(summaryRaw.fail || 0),
-                    needs_review: Number(summaryRaw.needs_review || 0),
-                    error: Number(summaryRaw.error || 0),
-                    total: Number(summaryRaw.total || mappedItems.length),
-                };
+                const summary = mapAuditSummary(data?.summary || {}, mappedItems.length);
+                const auditProfileSnapshot = mapAuditProfile(data?.audit_profile_snapshot);
+                const legacyAuditType = mapLegacyAuditType(data?.audit_type);
 
                 return {
                     jobId: String(data?.job_id || jobId),
@@ -595,7 +803,10 @@ export function useVectorSearch() {
                         ? (data.status as MultimodalAuditJobResult['status'])
                         : 'running',
                     generatedAt: String(data?.generated_at || ''),
-                    auditType: (data?.audit_type || 'contract') as AuditType,
+                    auditProfileId: String(data?.audit_profile_id || auditProfileSnapshot?.id || legacyAuditType || ''),
+                    auditProfileName: String(data?.audit_profile_name || auditProfileSnapshot?.name || ''),
+                    auditProfileSnapshot,
+                    legacyAuditType,
                     items: mappedItems,
                     summary,
                 };
@@ -621,21 +832,19 @@ export function useVectorSearch() {
                 const latest = jobs[0];
                 const itemsRaw = Array.isArray(latest?.items) ? latest.items : [];
                 const mappedItems = itemsRaw.map((item: any, idx: number) => mapAuditItem(docId, item, idx));
-                const summaryRaw = latest?.summary || {};
-                const summary: MultimodalAuditSummary = {
-                    pass: Number(summaryRaw.pass || 0),
-                    fail: Number(summaryRaw.fail || 0),
-                    needs_review: Number(summaryRaw.needs_review || 0),
-                    error: Number(summaryRaw.error || 0),
-                    total: Number(summaryRaw.total || mappedItems.length),
-                };
+                const summary = mapAuditSummary(latest?.summary || {}, mappedItems.length);
+                const auditProfileSnapshot = mapAuditProfile(latest?.audit_profile_snapshot);
+                const legacyAuditType = mapLegacyAuditType(latest?.audit_type);
                 return {
                     jobId: String(latest?.job_id || ''),
                     status: ['queued', 'running', 'completed', 'failed'].includes(String(latest?.status))
                         ? (latest.status as MultimodalAuditJobResult['status'])
                         : 'completed',
                     generatedAt: String(latest?.generated_at || latest?.finished_at || ''),
-                    auditType: (latest?.audit_type || 'contract') as AuditType,
+                    auditProfileId: String(latest?.audit_profile_id || auditProfileSnapshot?.id || legacyAuditType || ''),
+                    auditProfileName: String(latest?.audit_profile_name || auditProfileSnapshot?.name || ''),
+                    auditProfileSnapshot,
+                    legacyAuditType,
                     items: mappedItems,
                     summary,
                 };
@@ -686,6 +895,10 @@ export function useVectorSearch() {
         cancelOcr,
         getChatHistory,
         getComplianceHistory,
+        getAuditProfiles,
+        createAuditProfile,
+        updateAuditProfile,
+        deleteAuditProfile,
         createMultimodalAuditJob,
         watchMultimodalAuditProgress,
         getMultimodalAuditJobResult,

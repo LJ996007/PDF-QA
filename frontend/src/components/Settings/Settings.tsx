@@ -13,6 +13,7 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
     const [zhipuKey, setZhipuKey] = useState(config.zhipuApiKey);
     const [deepseekKey, setDeepseekKey] = useState(config.deepseekApiKey);
     const [dashscopeKey, setDashscopeKey] = useState(config.dashscopeApiKey || '');
+    const [qwenVlModel, setQwenVlModel] = useState(config.qwenVlModel || '');
     const [ocrProvider] = useState<'baidu'>('baidu');
     const [baiduOcrUrl, setBaiduOcrUrl] = useState(config.baiduOcrUrl || '');
     const [baiduOcrToken, setBaiduOcrToken] = useState(config.baiduOcrToken || '');
@@ -25,6 +26,7 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
             zhipuApiKey: zhipuKey,
             deepseekApiKey: deepseekKey,
             dashscopeApiKey: dashscopeKey,
+            qwenVlModel: qwenVlModel,
             ocrProvider: 'baidu',
             baiduOcrUrl: baiduOcrUrl,
             baiduOcrToken: baiduOcrToken,
@@ -105,6 +107,21 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                             value={dashscopeKey}
                             onChange={(e) => setDashscopeKey(e.target.value)}
                             placeholder="sk-xxxxxxxx（可选）"
+                        />
+                    </div>
+
+                    {/* 多模态模型名称 */}
+                    <div className="setting-group">
+                        <label className="setting-label">
+                            多模态模型名称
+                            <span className="setting-hint">留空则使用默认值 qwen-vl-max-latest</span>
+                        </label>
+                        <input
+                            type="text"
+                            className="setting-input"
+                            value={qwenVlModel}
+                            onChange={(e) => setQwenVlModel(e.target.value)}
+                            placeholder="qwen-vl-max-latest"
                         />
                     </div>
 

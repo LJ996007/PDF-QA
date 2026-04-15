@@ -46,6 +46,10 @@ chroma_db/
 uploads/
 doc_store/
 backend/doc_store/
+.runtime/
+.pytest_cache/
+backend/chroma_db.backup_*/
+tmp_e2e/
 
 # Test files
 *.pdf

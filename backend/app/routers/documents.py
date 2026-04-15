@@ -29,6 +29,7 @@ from app.models.schemas import (
     PageContent,
     ProgressEvent,
 )
+from app.services.audit_profile_service import audit_profile_service
 from app.services.baidu_ocr import baidu_ocr_gateway
 from app.services.document_store import document_store
 from app.services.local_ocr import local_ocr_gateway
@@ -82,6 +83,7 @@ class AuditQueueJob:
     doc_id: str
     request: MultimodalAuditJobRequest
     allowed_pages: List[int]
+    audit_profile_snapshot: Dict[str, Any]
 
 
 def _now_iso_utc() -> str:
@@ -605,10 +607,58 @@ def _load_doc_meta_into_memory(meta: dict) -> None:
         "pages": [],
         "baidu_ocr_url": None,
         "baidu_ocr_token": None,
+        "ocr_requirements_refreshed": False,
     }
     _sync_ocr_sets(doc)
     documents[doc_id] = doc
     _get_or_create_doc_lock(doc_id)
+
+
+def _refresh_doc_ocr_requirements_from_pdf(doc_id: str) -> None:
+    doc = documents.get(doc_id)
+    if not doc or doc.get("ocr_requirements_refreshed"):
+        return
+
+    file_path = doc.get("file_path") or ""
+    if not file_path or not os.path.exists(file_path):
+        doc["ocr_requirements_refreshed"] = True
+        return
+
+    try:
+        pages, thumbnails = process_document(file_path)
+    except Exception as exc:
+        logger.warning("Failed to refresh OCR requirements for %s: %s", doc_id, str(exc))
+        doc["ocr_requirements_refreshed"] = True
+        return
+
+    heuristic_required = set(get_ocr_required_pages(pages))
+    recognized_from_payload = _extract_recognized_pages_from_ocr_payload(doc_id)
+    existing_status = _coerce_page_status_map(doc.get("page_ocr_status"))
+    total_pages = len(pages)
+
+    refreshed_status: Dict[int, str] = {}
+    for page_num in range(1, total_pages + 1):
+        previous = existing_status.get(page_num, "recognized")
+        if page_num in recognized_from_payload:
+            refreshed_status[page_num] = "recognized"
+        elif page_num in heuristic_required:
+            refreshed_status[page_num] = previous if previous in {"processing", "failed"} else "unrecognized"
+        elif previous == "processing":
+            refreshed_status[page_num] = "processing"
+        else:
+            refreshed_status[page_num] = "recognized"
+
+    doc["pages"] = pages
+    doc["thumbnails"] = thumbnails
+    doc["total_pages"] = total_pages
+    doc["page_ocr_status"] = refreshed_status
+    doc["recognized_pages"] = sorted(set(_sorted_unique_pages(doc.get("recognized_pages") or [])) | recognized_from_payload)
+    doc["initial_ocr_required_pages"] = sorted(
+        set(_sorted_unique_pages(doc.get("initial_ocr_required_pages") or [])) | heuristic_required
+    )
+    doc["ocr_requirements_refreshed"] = True
+    _sync_ocr_sets(doc)
+    _persist_doc_meta(doc_id, status=(document_store.get_by_doc_id(doc_id) or {}).get("status", "completed"))
 
 
 def load_persisted_documents() -> None:
@@ -619,10 +669,12 @@ def load_persisted_documents() -> None:
 
 def ensure_document_loaded(doc_id: str) -> bool:
     if doc_id in documents:
+        _refresh_doc_ocr_requirements_from_pdf(doc_id)
         return True
     meta = document_store.get_by_doc_id(doc_id)
     if meta and meta.get("status") in {"completed", "processing"}:
         _load_doc_meta_into_memory(meta)
+        _refresh_doc_ocr_requirements_from_pdf(doc_id)
         return True
     return False
 
@@ -1002,9 +1054,21 @@ async def enqueue_audit_job(doc_id: str, request: MultimodalAuditJobRequest, all
             detail=f"Selected pages exceed limit ({len(target_pages)} > {max_pages}). Please narrow allowed_pages.",
         )
 
+    audit_profile = audit_profile_service.get_profile(request.audit_profile_id)
+    if not audit_profile:
+        raise HTTPException(status_code=404, detail="审核模板不存在。")
+    if bool(audit_profile.get("bidder_name_required")) and not request.bidder_name.strip():
+        raise HTTPException(status_code=400, detail="当前审核模板要求填写投标人名称。")
+    enabled_rules = [
+        rule for rule in (audit_profile.get("rules") or []) if isinstance(rule, dict) and bool(rule.get("enabled", True))
+    ]
+    if not enabled_rules:
+        raise HTTPException(status_code=400, detail="当前审核模板没有启用的审核项。")
+
     job_id = f"audit_{uuid.uuid4().hex[:12]}"
     created_at = _now_iso_utc()
     sanitized_request = request.model_copy(update={"api_key": None})
+    audit_profile_snapshot = jsonable_encoder(audit_profile)
 
     audit_jobs[job_id] = {
         "job_id": job_id,
@@ -1013,6 +1077,9 @@ async def enqueue_audit_job(doc_id: str, request: MultimodalAuditJobRequest, all
         "created_at": created_at,
         "finished_at": None,
         "request": sanitized_request.model_dump(),
+        "audit_profile_id": audit_profile_snapshot.get("id"),
+        "audit_profile_name": audit_profile_snapshot.get("name"),
+        "audit_profile_snapshot": audit_profile_snapshot,
         "allowed_pages": target_pages,
         "result": None,
         "error": None,
@@ -1035,6 +1102,7 @@ async def enqueue_audit_job(doc_id: str, request: MultimodalAuditJobRequest, all
                 doc_id=doc_id,
                 request=request,
                 allowed_pages=target_pages,
+                audit_profile_snapshot=audit_profile_snapshot,
             )
         )
 
@@ -1111,10 +1179,9 @@ async def run_audit_worker() -> None:
 
             result = await multimodal_audit_service.run_audit(
                 doc_id=job.doc_id,
-                audit_type=job.request.audit_type,
+                audit_profile=job.audit_profile_snapshot,
                 page_images=page_inputs,
                 bidder_name=job.request.bidder_name,
-                custom_checks=job.request.custom_checks,
                 api_key=job.request.api_key,
                 model=job.request.model,
                 progress_callback=on_service_progress,
@@ -1127,6 +1194,9 @@ async def run_audit_worker() -> None:
                 "created_at": record.get("created_at") or _now_iso_utc(),
                 "finished_at": _now_iso_utc(),
                 "request": (record.get("request") or {}),
+                "audit_profile_id": job.audit_profile_snapshot.get("id"),
+                "audit_profile_name": job.audit_profile_snapshot.get("name"),
+                "audit_profile_snapshot": job.audit_profile_snapshot,
                 "allowed_pages": list(job.allowed_pages),
                 **(result or {}),
             }
@@ -1343,11 +1413,14 @@ async def recognize_document_page(doc_id: str, page_num: int, api_key: Optional[
 
             target_page = _get_target_page(doc, page_num)
             if target_page:
+                existing_text = (target_page.text or "").strip()
+                ocr_text = "\n".join(c.text for c in chunks).strip()
                 target_page.image_base64 = image_base64
-                target_page.type = "ocr"
-                target_page.text = "\n".join(c.text for c in chunks).strip()
-                target_page.coordinates = [c.bbox for c in chunks if c.bbox]
+                target_page.type = "native" if existing_text else "ocr"
+                target_page.text = existing_text or ocr_text
+                target_page.coordinates = target_page.coordinates if existing_text else [c.bbox for c in chunks if c.bbox]
                 target_page.confidence = 0.9
+                target_page.needs_ocr = False
 
             _sync_ocr_sets(doc)
             _save_ocr_page_result(
@@ -1492,6 +1565,7 @@ async def process_document_async(
             "conversion_status": conversion_status,
             "conversion_ms": conversion_ms,
             "text_fallback_used": text_fallback_used,
+            "ocr_requirements_refreshed": True,
         }
         _update_doc_metrics(doc)
         _sync_ocr_sets(doc)
@@ -1826,6 +1900,21 @@ async def get_progress(doc_id: str):
     async def event_generator():
         while True:
             if doc_id not in document_progress:
+                meta = document_store.get_by_doc_id(doc_id) or {}
+                status = str(meta.get("status") or "").strip().lower()
+                if status in {"completed", "failed"}:
+                    fallback = ProgressEvent(
+                        stage="completed" if status == "completed" else "failed",
+                        current=100 if status == "completed" else 0,
+                        total=100,
+                        message="文档已就绪。" if status == "completed" else str(meta.get("error") or "文档处理失败"),
+                        document_id=doc_id,
+                    )
+                    yield {
+                        "event": "progress",
+                        "data": json.dumps(fallback.model_dump()),
+                    }
+                    break
                 yield {
                     "event": "error",
                     "data": json.dumps({"message": "Document not found"}),
@@ -2112,9 +2201,6 @@ async def cancel_doc_ocr(doc_id: str):
 async def create_multimodal_audit_job(doc_id: str, request: MultimodalAuditJobRequest):
     if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="Document not found")
-
-    if request.audit_type in {"certificate", "personnel"} and not request.bidder_name.strip():
-        raise HTTPException(status_code=400, detail="bidder_name is required for certificate/personnel audit.")
 
     doc = documents.get(doc_id)
     if doc is None:

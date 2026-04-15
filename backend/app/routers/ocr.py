@@ -41,7 +41,7 @@ async def ocr_page(doc_id: str, page_num: int):
     if not target_page:
         raise HTTPException(status_code=404, detail="页面不存在")
     
-    if target_page.type == "native":
+    if target_page.type == "native" and not target_page.needs_ocr:
         # 原生文本页，不需要OCR
         return OCRResponse(page=page_num, chunks=[])
     
@@ -98,6 +98,7 @@ async def ocr_page(doc_id: str, page_num: int):
     
     # 更新页面状态
     target_page.type = "native"
-    target_page.text = "\n".join([c.text for c in chunks])
-    
+    target_page.text = (target_page.text or "").strip() or "\n".join([c.text for c in chunks])
+    target_page.needs_ocr = False
+
     return OCRResponse(page=page_num, chunks=chunks)

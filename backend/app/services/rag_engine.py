@@ -1,5 +1,5 @@
 """
-RAG 寮曟搸锛氬熀浜?ChromaDB 鐨勬绱笌绱㈠紩鏈嶅姟銆?
+RAG engine built on top of ChromaDB for indexing and retrieval.
 """
 import chromadb
 from chromadb.config import Settings
@@ -24,9 +24,26 @@ except ImportError:
     HAS_BM25 = False
     print("Warning: rank_bm25 or jieba not found. Hybrid search disabled.")
 
+try:
+    from sentence_transformers import CrossEncoder as _CrossEncoder
+    _reranker = None
+
+    def _get_reranker():
+        global _reranker
+        if _reranker is None:
+            print("[Reranker] Loading BAAI/bge-reranker-base ...", flush=True)
+            _reranker = _CrossEncoder("BAAI/bge-reranker-base", max_length=512)
+            print("[Reranker] Model loaded.", flush=True)
+        return _reranker
+
+    HAS_RERANKER = True
+except ImportError:
+    HAS_RERANKER = False
+    print("Warning: sentence-transformers not found. Cross-encoder reranking disabled.")
+
 
 class RAGEngine:
-    """RAG 妫€绱㈠紩鎿庯紝璐熻矗鍚戦噺绱㈠紩銆佹贩鍚堟绱笌寮曠敤瀹氫綅銆?"""
+    """Index, retrieve, and locate references for document QA."""
     
     def __init__(self, persist_directory: str = "./chroma_db"):
         self.client = chromadb.PersistentClient(
@@ -34,7 +51,7 @@ class RAGEngine:
             settings=Settings(anonymized_telemetry=False)
         )
         self.collection = self.client.get_or_create_collection(
-            name="documents_v3",  # 浣跨敤 v3 闆嗗悎锛岀‘淇濆悜閲忕淮搴︿负 2048銆?
+            name="documents_v3",  # Keep a dedicated collection for 2048-dim embedding-3 vectors.
             metadata={"hnsw:space": "cosine"}
         )
 
@@ -42,13 +59,11 @@ class RAGEngine:
         self.bm25_cache = {} # Cache for BM25 indices: {doc_id: {'model': bm25, 'ids': [], 'texts': []}}
     
     async def _get_embeddings(self, texts: List[str], api_key: Optional[str] = None) -> List[List[float]]:
-        """
-        鑾峰彇鏂囨湰鍚戦噺锛堜紭鍏堜娇鐢ㄦ櫤璋?API锛夈€?
-        """
+        """Fetch embeddings, preferring the Zhipu API when available."""
         final_api_key = api_key or self.zhipu_api_key
         
         if not final_api_key:
-            # 鏃?API Key 鏃朵娇鐢ㄥ搱甯屽悜閲忥紙浠呯敤浜庢祴璇曞拰鍏滃簳锛夈€?
+            # Fall back to a deterministic hash embedding for tests or local-only use.
             return [self._simple_hash_embedding(text) for text in texts]
         
         headers = {
@@ -58,7 +73,7 @@ class RAGEngine:
         
         embeddings = []
         
-        # 鎵归噺澶勭悊锛屾瘡娆℃渶澶?10 鏉°€?
+        # Batch requests to reduce API overhead.
         for i in range(0, len(texts), 10):
             batch = texts[i:i+10]
             
@@ -88,10 +103,10 @@ class RAGEngine:
         return embeddings
     
     def _simple_hash_embedding(self, text: str, dim: int = 2048) -> List[float]:
-        """鐢熸垚绠€鏄撳搱甯屽悜閲忥紙鏃?API Key 鏃跺厹搴曪級銆?"""
+        """Generate a simple deterministic embedding when no API key is available."""
         import hashlib
         hash_bytes = hashlib.sha256(text.encode()).digest()
-        # 鎵╁睍鍒版寚瀹氱淮搴︺€?
+        # Repeat the hash bytes until we reach the requested dimension.
         embedding = []
         for i in range(dim):
             byte_idx = i % len(hash_bytes)
@@ -109,14 +124,20 @@ class RAGEngine:
             return True
 
         compact = re.sub(r"\s+", "", t)
-        if len(compact) <= 2:
-            return True
-
+        has_cjk = any("\u4e00" <= c <= "\u9fff" for c in compact)
         if re.fullmatch(r"[\W_]+", compact, flags=re.UNICODE):
             return True
 
-        has_cjk = any("\u4e00" <= c <= "\u9fff" for c in compact)
-        if has_cjk and len(compact) <= 3:
+        if has_cjk:
+            cjk_count = sum(1 for c in compact if "\u4e00" <= c <= "\u9fff")
+            has_ascii_alnum = any(c.isascii() and c.isalnum() for c in compact)
+            has_digits = any(c.isdigit() for c in compact)
+
+            # Preserve short but meaningful table labels such as “金额”“税率”“A类”“第1页”.
+            if cjk_count >= 2 or (len(compact) >= 2 and (has_ascii_alnum or has_digits)):
+                return False
+
+        if len(compact) <= 2:
             return True
 
         if compact.isascii():
@@ -202,9 +223,7 @@ class RAGEngine:
         return best_i
     
     def _chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
-        """
-        鎸夐暱搴︿笌璇箟鏂偣鍒囧垎鏂囨湰銆?
-        """
+        """Split long text into overlapping chunks near sentence boundaries."""
         if len(text) <= chunk_size:
             return [text] if text.strip() else []
         
@@ -214,9 +233,9 @@ class RAGEngine:
         while start < len(text):
             end = start + chunk_size
             
-            # 浼樺厛鍦ㄥ彞瀛愯竟鐣屽鍒囧垎锛屽噺灏戣涔夋柇瑁傘€?
+            # Prefer sentence boundaries to reduce semantic breaks.
             if end < len(text):
-                # 鏌ユ壘鏈€杩戠殑鏍囩偣鎴栨崲琛屻€?
+                # Look for the nearest punctuation mark or line break.
                 for sep in ["\n\n", "。", ".", "\n", "；", ";", "，", ","]:
                     last_sep = text[start:end].rfind(sep)
                     if last_sep > chunk_size // 2:
@@ -233,8 +252,9 @@ class RAGEngine:
     
     async def index_document(self, doc_id: str, pages: List[PageContent], api_key: Optional[str] = None) -> int:
         """
-        寤虹珛鏂囨。绱㈠紩銆?
-        杩斿洖: 绱㈠紩鍚庣殑 chunk 鏁伴噺銆?
+        Build the retrieval index for a document.
+
+        Returns the number of indexed chunks.
         """
         all_chunks = []
         all_ids = []
@@ -242,18 +262,18 @@ class RAGEngine:
         header_footer_repeat_keys = self._collect_header_footer_repeat_keys(pages)
         seen_cross_page_chunks = set()
         
-        # 鍏ㄥ眬 chunk 璁℃暟鍣紙鐢ㄤ簬鐢熸垚 b0001 杩欑被 block_id锛夈€?
+        # Global counter used to generate stable block ids such as b0001.
         global_chunk_count = 0
 
         for page in pages:
             if not page.text:
                 continue
                 
-            # 妫€鏌ユ槸鍚﹀瓨鍦ㄥ潗鏍囨暟鎹紙OCR 鎴栧師鐢熸枃鏈級銆?
+            # When coordinates are available, preserve them for precise highlighting.
             has_coords = page.coordinates and len(page.coordinates) > 0
             
             if has_coords:
-                # 鏈夌簿纭潗鏍囨椂锛屾寜琛屾瀯寤哄潡銆?
+                # Build chunks line by line when we have reliable coordinates.
                 text_lines = page.text.split('\n')
                 # Build (text, bbox) entries first (skip OCR noise), then merge consecutive
                 # lines into slightly larger chunks for better retrieval quality.
@@ -367,7 +387,7 @@ class RAGEngine:
 
                 flush_current()
             else:
-                # 鏃犵簿纭潗鏍囨椂锛屾寜娈佃惤鍒囧潡銆?
+                # Fall back to paragraph-style chunking when coordinates are unavailable.
                 text_chunks = self._chunk_text(page.text)
 
                 for idx, chunk_text in enumerate(text_chunks):
@@ -400,10 +420,10 @@ class RAGEngine:
         if not all_chunks:
             return 0
         
-        # 鐢熸垚鍚戦噺銆?
+        # Generate embeddings for all chunks.
         embeddings = await self._get_embeddings(all_chunks, api_key)
         
-        # 鍐欏叆 ChromaDB銆?
+        # Persist chunks into ChromaDB.
         self.collection.add(
             ids=all_ids,
             embeddings=embeddings,
@@ -413,7 +433,7 @@ class RAGEngine:
         
         print(f"[RAG] Indexed {len(all_chunks)} chunks, first bbox: {all_metadatas[0] if all_metadatas else 'N/A'}")
         
-        # 绱㈠紩鏇存柊鍚庝娇 BM25 缂撳瓨澶辨晥銆?
+        # Refresh BM25 on the next query after the index changes.
         self._invalidate_bm25_cache(doc_id)
         
         return len(all_chunks)
@@ -425,9 +445,7 @@ class RAGEngine:
         chunks: List[dict],
         api_key: Optional[str] = None
     ) -> int:
-        """
-        绱㈠紩 OCR 缁撴灉銆?
-        """
+        """Index OCR results for a single page."""
         all_chunks = []
         all_ids = []
         all_metadatas = []
@@ -468,14 +486,22 @@ class RAGEngine:
     
 
 
+    _STOPWORDS = {
+        "的","了","在","是","我","有","和","就","不","人","都","一","一个",
+        "上","也","很","到","说","要","去","你","会","着","没有","看","好",
+        "自己","这","那","与","为","以","及","等","或","但","而","对","从",
+        "中","之","其","所","该","此","于","后","前","下","内","外","间"
+    }
+
     def _tokenize(self, text: str) -> List[str]:
-        """浣跨敤 jieba 杩涜涓枃鍒嗚瘝銆?"""
+        """使用 jieba 进行中文分词，并过滤停用词。"""
         if not HAS_BM25:
             return text.split()
-        return list(jieba.cut_for_search(text))
+        tokens = list(jieba.cut_for_search(text))
+        return [t for t in tokens if t.strip() and t not in self._STOPWORDS]
 
     def _ensure_bm25_index(self, doc_id: str):
-        """纭繚鎸囧畾鏂囨。鐨?BM25 绱㈠紩宸叉瀯寤恒€?"""
+        """Ensure the BM25 index for the given document is ready."""
         if not HAS_BM25:
             return
 
@@ -483,7 +509,7 @@ class RAGEngine:
             return
 
         print(f"[Hybrid] Building BM25 index for {doc_id}...")
-        # 1. 浠?ChromaDB 璇诲彇鏂囨。鐨勫叏閮ㄥ垎鍧椼€?
+        # 1. Load all chunks for this document from ChromaDB.
         try:
             results = self.collection.get(
                 where={"doc_id": doc_id},
@@ -502,10 +528,10 @@ class RAGEngine:
             ids = results["ids"]
             texts = results["documents"]
             
-            # 2. 鍒嗚瘝銆?
+            # 2. Tokenize the corpus.
             tokenized_corpus = [self._tokenize(doc) for doc in texts]
             
-            # 3. 鏋勫缓 BM25 绱㈠紩銆?
+            # 3. Build the BM25 index.
             bm25 = BM25Okapi(tokenized_corpus)
             
             self.bm25_cache[doc_id] = {
@@ -521,7 +547,7 @@ class RAGEngine:
             traceback.print_exc()
 
     def _invalidate_bm25_cache(self, doc_id: str):
-        """浣挎寚瀹氭枃妗ｇ殑 BM25 缂撳瓨澶辨晥銆?"""
+        """Invalidate the cached BM25 index for a document."""
         if doc_id in self.bm25_cache:
             del self.bm25_cache[doc_id]
             print(f"[Hybrid] Cache invalidated for {doc_id}")
@@ -534,10 +560,9 @@ class RAGEngine:
         api_key: Optional[str] = None,
         allowed_pages: Optional[List[int]] = None,
         ensure_page_coverage: bool = False,
+        expand_context: bool = False,
     ) -> List[TextChunk]:
-        """
-        妫€绱㈢浉鍏虫枃鏈潡骞惰繑鍥炲甫鍧愭爣鐨勫紩鐢ㄣ€?
-        """
+        """Retrieve relevant chunks and return them with highlight coordinates."""
         allowed_page_set = set(allowed_pages or [])
         allowed_page_list = sorted(allowed_page_set)
         coverage_enabled = ensure_page_coverage and bool(allowed_page_set) and len(allowed_page_set) <= 20
@@ -548,13 +573,13 @@ class RAGEngine:
             print(message, flush=True)
             logger.info(message)
 
-        # 鐢熸垚鏌ヨ鍚戦噺銆?
+        # Generate the query embedding.
         query_embedding = (await self._get_embeddings([query], api_key))[0]
 
-        # 鎵ц娣峰悎妫€绱紙RRF 铻嶅悎锛夈€?
+        # Run hybrid retrieval and combine rankings with RRF.
 
 
-        # 1. 鍚戦噺妫€绱紙Vector Search锛夈€?
+        # 1. Vector search.
         # Get enough candidates so we can filter OCR noise and still return top_k results.
         k_vector = max(top_k * 10, 50)
         vector_results = self.collection.query(
@@ -563,8 +588,8 @@ class RAGEngine:
             n_results=k_vector
         )
 
-        # 2. 鍏抽敭璇嶆绱紙BM25 Search锛夈€?
-        # 鍏堢‘淇?BM25 绱㈠紩瀛樺湪銆?
+        # 2. BM25 keyword search.
+        # Make sure the BM25 index exists first.
         self._ensure_bm25_index(doc_id)
 
         bm25_top_n = []
@@ -575,40 +600,64 @@ class RAGEngine:
 
             if bm25:
                 tokenized_query = self._tokenize(query)
-                # 鑾峰彇鍏ㄩ儴寰楀垎銆?
+                # Score the query against the BM25 corpus.
                 doc_scores = bm25.get_scores(tokenized_query)
 
-                # 鑾峰彇 Top N 绱㈠紩锛坅rgsort 涓哄崌搴忥紝闇€鍙嶈浆锛夈€?
+                # Select the top-N matches. argsort returns ascending order, so reverse it.
 
                 import numpy as np
                 top_indices = np.argsort(doc_scores)[-k_vector:][::-1]
 
                 for idx in top_indices:
-                    if doc_scores[idx] > 0:  # 浠呬繚鐣欐湁鍖归厤鍒嗘暟鐨勭粨鏋溿€?
+                    if doc_scores[idx] > 0:  # Keep only positive-scoring matches.
                         bm25_top_n.append(doc_ids[idx])
 
-        # 3. RRF 铻嶅悎锛圧eciprocal Rank Fusion锛夈€?
+        # 3. Reciprocal Rank Fusion (RRF).
         # Score = 1 / (k + rank)
         rrf_k = 60
         final_scores = {}  # {chunk_id: score}
 
-        # 鍚堝苟鍚戦噺妫€绱㈢粨鏋溿€?
+        # Merge vector-search rankings.
         if vector_results["ids"] and vector_results["ids"][0]:
             for rank, chunk_id in enumerate(vector_results["ids"][0]):
                 final_scores[chunk_id] = final_scores.get(chunk_id, 0) + (1 / (rrf_k + rank + 1))
 
-        # 鍚堝苟 BM25 缁撴灉銆?
+        # Merge BM25 rankings.
         for rank, chunk_id in enumerate(bm25_top_n):
             final_scores[chunk_id] = final_scores.get(chunk_id, 0) + (1 / (rrf_k + rank + 1))
 
-        # 4. 鎺掑簭骞惰幏鍙?chunk 璇︽儏銆?
+        # 4. Sort candidates and fetch chunk details.
 
         candidate_ids = sorted(final_scores.keys(), key=lambda x: final_scores[x], reverse=True)
 
         if not candidate_ids:
             return []
 
-        # 鎵归噺鑾峰彇 chunk 璇︽儏銆?
+        # Reranking: cross-encoder 精排（仅当候选数 > top_k 且模型可用时）
+        if HAS_RERANKER and len(candidate_ids) > top_k:
+            try:
+                reranker = _get_reranker()
+                # 取前 min(20, len) 个候选送入 reranker，控制延迟
+                rerank_candidates = candidate_ids[:min(20, len(candidate_ids))]
+                raw = self.collection.get(
+                    ids=rerank_candidates,
+                    include=["documents"]
+                )
+                # ChromaDB .get() 返回顺序不保证，需对齐
+                id_to_text = dict(zip(raw["ids"], raw["documents"]))
+                pairs = [[query, id_to_text.get(cid, "")] for cid in rerank_candidates]
+                scores = reranker.predict(pairs, show_progress_bar=False)
+                reranked = [rerank_candidates[i]
+                            for i in sorted(range(len(scores)),
+                                            key=lambda x: scores[x], reverse=True)]
+                # 将 rerank 结果拼接剩余候选（未送入 reranker 的部分保持原顺序）
+                remaining = [cid for cid in candidate_ids if cid not in set(reranked)]
+                candidate_ids = reranked + remaining
+                print(f"[Reranker] reranked top-{len(reranked)} candidates", flush=True)
+            except Exception as e:
+                print(f"[Reranker] reranking failed, fallback to RRF order: {e}", flush=True)
+
+        # 批量获取 chunk 详情。
         # ChromaDB .get()
         candidate_limit = max(top_k * 20, 200)
         candidate_ids = candidate_ids[:candidate_limit]
@@ -714,13 +763,58 @@ class RAGEngine:
         else:
             chunks = candidate_chunks[:top_k]
 
+        # 上下文扩展：把每个命中块的前后相邻块也拉取过来，避免段落被切断导致漏判
+        if expand_context and chunks:
+            existing_ids = {c.id for c in chunks}
+            neighbor_ids = []
+            for c in chunks:
+                bid = c.block_id  # e.g. "b0025"
+                if bid and bid.startswith("b") and bid[1:].isdigit():
+                    n = int(bid[1:])
+                    for delta in (-1, 1):
+                        nb = f"b{n + delta:04d}"
+                        nid = f"{doc_id}_{nb}"
+                        if nid not in existing_ids:
+                            neighbor_ids.append(nid)
+                            existing_ids.add(nid)
+            if neighbor_ids:
+                try:
+                    nb_data = self.collection.get(
+                        ids=neighbor_ids,
+                        include=["documents", "metadatas"]
+                    )
+                    for nb_id, nb_doc, nb_meta in zip(nb_data["ids"], nb_data["documents"], nb_data["metadatas"]):
+                        if not nb_doc or self._is_low_value_text(nb_doc):
+                            continue
+                        if allowed_page_set and nb_meta.get("page") not in allowed_page_set:
+                            continue
+                        chunks.append(TextChunk(
+                            id=nb_id,
+                            document_id=doc_id,
+                            page_number=nb_meta["page"],
+                            content=nb_doc,
+                            bbox=BoundingBox(
+                                page=nb_meta["page"],
+                                x=nb_meta["bbox_x"],
+                                y=nb_meta["bbox_y"],
+                                w=nb_meta["bbox_w"],
+                                h=nb_meta["bbox_h"],
+                            ),
+                            source_type=nb_meta["source"],
+                            distance=0,
+                            ref_id=None,
+                            block_id=nb_meta.get("block_id"),
+                        ))
+                except Exception as e:
+                    print(f"[ContextExpand] neighbor fetch failed: {e}", flush=True)
+
         for idx, chunk in enumerate(chunks):
             chunk.ref_id = f"ref-{idx + 1}"
 
         return chunks
 
     def delete_document(self, doc_id: str):
-        """鍒犻櫎鎸囧畾鏂囨。鐨勫叏閮ㄧ储寮曟暟鎹€?"""
+        """Delete all indexed data for a document."""
         try:
             self.collection.delete(where={"doc_id": doc_id})
             self._invalidate_bm25_cache(doc_id)
@@ -728,7 +822,7 @@ class RAGEngine:
             pass
 
 
-# 鍏ㄥ眬瀹炰緥
+# Global instance.
 rag_engine = RAGEngine()
 
 

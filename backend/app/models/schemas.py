@@ -27,6 +27,7 @@ class PageContent(BaseModel):
     coordinates: Optional[List[BoundingBox]] = None
     confidence: float = 1.0
     image_base64: Optional[str] = None
+    needs_ocr: bool = False
 
 
 class TextChunk(BaseModel):
@@ -102,6 +103,9 @@ class ChatRequest(BaseModel):
     zhipu_api_key: Optional[str] = None
     deepseek_api_key: Optional[str] = None
     allowed_pages: List[int] = Field(default_factory=list)
+    use_vision: bool = False
+    dashscope_api_key: Optional[str] = None
+    vision_model: Optional[str] = None
 
 
 class ChatReference(BaseModel):
@@ -166,13 +170,48 @@ class MultimodalAuditSummary(BaseModel):
     error: int = 0
 
 
+class AuditProfileRule(BaseModel):
+    """One editable audit rule inside an audit profile."""
+
+    id: str
+    title: str
+    instruction: str
+    enabled: bool = True
+
+
+class AuditProfile(BaseModel):
+    """Persisted audit profile definition."""
+
+    id: str
+    name: str
+    bidder_name_required: bool = False
+    rules: List[AuditProfileRule] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class AuditProfileCreateRequest(BaseModel):
+    """Create request for a shared audit profile."""
+
+    name: str
+    bidder_name_required: bool = False
+    rules: List[AuditProfileRule] = Field(default_factory=list)
+
+
+class AuditProfileUpdateRequest(BaseModel):
+    """Update request for a shared audit profile."""
+
+    name: str
+    bidder_name_required: bool = False
+    rules: List[AuditProfileRule] = Field(default_factory=list)
+
+
 class MultimodalAuditJobRequest(BaseModel):
     """Request payload for creating multimodal audit job."""
 
-    audit_type: Literal["contract", "certificate", "personnel"]
+    audit_profile_id: str
     bidder_name: str = ""
     allowed_pages: List[int] = Field(default_factory=list)
-    custom_checks: List[str] = Field(default_factory=list)
     api_key: Optional[str] = None
     model: Optional[str] = None
 

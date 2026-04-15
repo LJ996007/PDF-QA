@@ -1,10 +1,14 @@
 .audit-panel {
     display: flex;
     flex-direction: column;
+    flex: 1;
     height: 100%;
+    min-height: 0;
     gap: 12px;
     padding: 12px;
     background: #f8fafc;
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .audit-form {
@@ -17,12 +21,21 @@
     padding: 12px;
 }
 
+.audit-form-top {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+}
+
 .audit-field {
     display: flex;
     flex-direction: column;
     gap: 6px;
     font-size: 13px;
     color: #334155;
+}
+
+.audit-field-grow {
+    min-width: 0;
 }
 
 .audit-field input,
@@ -37,7 +50,119 @@
 
 .audit-field textarea {
     resize: vertical;
-    min-height: 70px;
+    min-height: 84px;
+}
+
+.audit-profile-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.audit-secondary-btn {
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #fff;
+    color: #1e293b;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 14px;
+    cursor: pointer;
+}
+
+.audit-secondary-btn.primary {
+    border-color: #2563eb;
+    color: #2563eb;
+}
+
+.audit-secondary-btn.danger {
+    border-color: #fecaca;
+    color: #b91c1c;
+}
+
+.audit-secondary-btn:disabled,
+.audit-submit-btn:disabled,
+.audit-rule-remove:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.audit-checkbox-field {
+    justify-content: flex-end;
+}
+
+.audit-checkbox-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #334155;
+}
+
+.audit-rules-section {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-top: 4px;
+}
+
+.audit-rules-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.audit-rules-title {
+    display: block;
+    font-size: 14px;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.audit-rules-hint {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: #64748b;
+}
+
+.audit-rule-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.audit-rule-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    border: 1px solid #dbeafe;
+    border-radius: 10px;
+    background: #f8fbff;
+    padding: 12px;
+}
+
+.audit-rule-card-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.audit-rule-index {
+    font-size: 12px;
+    font-weight: 700;
+    color: #1d4ed8;
+}
+
+.audit-rule-remove {
+    margin-left: auto;
+    border: none;
+    background: transparent;
+    color: #dc2626;
+    font-size: 13px;
+    cursor: pointer;
 }
 
 .audit-submit-btn {
@@ -53,9 +178,34 @@
     cursor: pointer;
 }
 
-.audit-submit-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
+.audit-profile-banner {
+    border: 1px solid #dbeafe;
+    border-radius: 10px;
+    background: #eff6ff;
+    color: #1d4ed8;
+    padding: 10px 12px;
+    font-size: 12px;
+}
+
+.audit-profile-banner.warning {
+    border-color: #fde68a;
+    background: #fffbeb;
+    color: #92400e;
+}
+
+.audit-profile-banner.error {
+    border-color: #fecaca;
+    background: #fef2f2;
+    color: #b91c1c;
+}
+
+.audit-meta-banner {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    background: #fff;
+    color: #475569;
+    padding: 10px 12px;
+    font-size: 12px;
 }
 
 .audit-progress {
@@ -178,11 +328,23 @@
 }
 
 @media (max-width: 1024px) {
-    .audit-form {
+    .audit-form,
+    .audit-form-top {
         grid-template-columns: 1fr;
     }
 
-    .audit-submit-btn {
-        justify-self: stretch;
+    .audit-profile-actions {
+        justify-content: stretch;
+    }
+
+    .audit-profile-actions .audit-secondary-btn,
+    .audit-submit-btn,
+    .audit-rules-header .audit-secondary-btn {
+        width: 100%;
+    }
+
+    .audit-rules-header {
+        flex-direction: column;
+        align-items: stretch;
     }
 }

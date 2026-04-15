@@ -4,11 +4,28 @@ import { useVectorSearch } from '../../hooks/useVectorSearch';
 import { MessageItem } from './MessageItem';
 import './ChatPanel.css';
 
+const formatPageList = (pages: number[]): string => {
+    const sorted = [...pages].sort((a, b) => a - b);
+    return sorted.join('、');
+};
+
 export const ChatPanel: React.FC = () => {
-    const { messages, isLoading, currentDocument, clearMessages, clearHighlights } = useDocumentStore();
+    const {
+        messages,
+        isLoading,
+        currentDocument,
+        clearMessages,
+        clearHighlights,
+        config,
+        selectedPages,
+        setSelectedPages,
+    } = useDocumentStore();
     const { askQuestion } = useVectorSearch();
 
     const [inputValue, setInputValue] = useState('');
+    const [pageFrom, setPageFrom] = useState('');
+    const [pageTo, setPageTo] = useState('');
+    const [useVision, setUseVision] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -23,8 +40,24 @@ export const ChatPanel: React.FC = () => {
 
         setInputValue('');
 
+        const totalPages = currentDocument.totalPages;
+        let allowedPages: number[] | undefined;
+        if (selectedPages.length > 0) {
+            allowedPages = [...selectedPages].sort((a, b) => a - b);
+        } else {
+            const from = parseInt(pageFrom, 10);
+            const to = parseInt(pageTo, 10);
+            if (!isNaN(from) || !isNaN(to)) {
+                const start = isNaN(from) ? 1 : Math.max(1, from);
+                const end = isNaN(to) ? totalPages : Math.min(totalPages, to);
+                if (start <= end) {
+                    allowedPages = Array.from({ length: end - start + 1 }, (_, i) => start + i);
+                }
+            }
+        }
+
         try {
-            await askQuestion(question);
+            await askQuestion(question, { allowedPages, useVision });
         } catch (error) {
             console.error('问答错误:', error);
         }
@@ -42,6 +75,12 @@ export const ChatPanel: React.FC = () => {
         '总结第一页的要点',
         '文档中有哪些关键数据？',
     ];
+    const selectedPagesText = selectedPages.length > 0 ? formatPageList(selectedPages) : '';
+    const pageScopeText = selectedPages.length > 0
+        ? `当前问答范围：已选页面 ${selectedPagesText}`
+        : (pageFrom || pageTo)
+            ? `当前问答范围：第 ${pageFrom || '1'} ~ ${pageTo || currentDocument?.totalPages || ''} 页`
+            : '当前问答范围：全文，可在左侧网格视图勾选页面';
 
     return (
         <div className="chat-panel">
@@ -90,7 +129,69 @@ export const ChatPanel: React.FC = () => {
                     >
                         清空上下文
                     </button>
+                    {currentDocument && selectedPages.length > 0 && (
+                        <div className="selected-pages-selector" title="问答会优先按这些页面检索和回答">
+                            <span className="selected-pages-label">已选页面：</span>
+                            <span className="selected-pages-value">{selectedPagesText}</span>
+                            <button
+                                className="selected-pages-clear"
+                                onClick={() => setSelectedPages([])}
+                                disabled={isLoading}
+                                title="清除页面选择"
+                            >
+                                清除
+                            </button>
+                        </div>
+                    )}
+                    {currentDocument && (
+                        <div className="page-range-selector">
+                            <span className="page-range-label">手动页码：</span>
+                            <input
+                                type="number"
+                                className="page-range-input"
+                                value={pageFrom}
+                                onChange={(e) => setPageFrom(e.target.value)}
+                                placeholder="起始"
+                                min={1}
+                                max={currentDocument.totalPages}
+                                disabled={isLoading || selectedPages.length > 0}
+                            />
+                            <span className="page-range-sep">~</span>
+                            <input
+                                type="number"
+                                className="page-range-input"
+                                value={pageTo}
+                                onChange={(e) => setPageTo(e.target.value)}
+                                placeholder="结束"
+                                min={1}
+                                max={currentDocument.totalPages}
+                                disabled={isLoading || selectedPages.length > 0}
+                            />
+                            {(pageFrom || pageTo) && (
+                                <button
+                                    className="page-range-clear"
+                                    onClick={() => { setPageFrom(''); setPageTo(''); }}
+                                    disabled={isLoading || selectedPages.length > 0}
+                                    title="清除范围限制"
+                                >×</button>
+                            )}
+                        </div>
+                    )}
+                    {currentDocument && config.dashscopeApiKey && (
+                        <label className="vision-toggle" title="使用 Qwen VL 视觉模型直接读取页面图像回答，适合表格、图片、扫描件">
+                            <input
+                                type="checkbox"
+                                checked={useVision}
+                                onChange={(e) => setUseVision(e.target.checked)}
+                                disabled={isLoading}
+                            />
+                            <span>👁 视觉模型</span>
+                        </label>
+                    )}
                 </div>
+                {currentDocument && (
+                    <div className="page-scope-summary">{pageScopeText}</div>
+                )}
 
                 <div className="chat-input-row">
                     <textarea

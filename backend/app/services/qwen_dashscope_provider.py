@@ -28,7 +28,7 @@ class QwenDashScopeProvider(MultimodalProvider):
         self,
         images: List[PageImageInput],
         prompt: str,
-        json_schema: Dict[str, Any],
+        json_schema: Optional[Dict[str, Any]] = None,
         *,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
@@ -43,14 +43,7 @@ class QwenDashScopeProvider(MultimodalProvider):
             prompt=prompt,
             json_schema=json_schema,
             model=final_model,
-            include_schema=True,
-        )
-        fallback_payload = self._build_payload(
-            images=images,
-            prompt=prompt,
-            json_schema=json_schema,
-            model=final_model,
-            include_schema=False,
+            include_schema=json_schema is not None,
         )
         headers = {
             "Authorization": f"Bearer {final_api_key}",
@@ -65,15 +58,10 @@ class QwenDashScopeProvider(MultimodalProvider):
                     response = await client.post(self.base_url, headers=headers, json=payload)
                     response.raise_for_status()
                     data = response.json()
-                return self._extract_structured_json(data)
+                return self._extract_structured_json(data, free_text=(json_schema is None))
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in {400, 422}:
-                    async with httpx.AsyncClient(timeout=float(self.timeout_sec)) as client:
-                        response = await client.post(self.base_url, headers=headers, json=fallback_payload)
-                        response.raise_for_status()
-                        data = response.json()
-                    return self._extract_structured_json(data)
-                last_exc = exc
+                # json_object 模式下不应再出现 400/422，直接上抛
+                raise
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
 
@@ -84,7 +72,7 @@ class QwenDashScopeProvider(MultimodalProvider):
         *,
         images: List[PageImageInput],
         prompt: str,
-        json_schema: Dict[str, Any],
+        json_schema: Optional[Dict[str, Any]],
         model: str,
         include_schema: bool,
     ) -> Dict[str, Any]:
@@ -105,13 +93,11 @@ class QwenDashScopeProvider(MultimodalProvider):
             "max_tokens": 4096,
         }
         if include_schema:
-            payload["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "multimodal_audit", "schema": json_schema},
-            }
+            # VL 多模态模型不支持 json_schema，仅支持 json_object
+            payload["response_format"] = {"type": "json_object"}
         return payload
 
-    def _extract_structured_json(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_structured_json(self, raw: Dict[str, Any], free_text: bool = False) -> Dict[str, Any]:
         choices = raw.get("choices") or []
         if not choices:
             raise ValueError("DashScope response has no choices.")
@@ -120,6 +106,9 @@ class QwenDashScopeProvider(MultimodalProvider):
         text = self._content_to_text(content_raw).strip()
         if not text:
             raise ValueError("DashScope response content is empty.")
+
+        if free_text:
+            return {"answer": text}
 
         # Some models still wrap JSON in markdown fences.
         if text.startswith("```"):

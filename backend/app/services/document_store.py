@@ -4,6 +4,7 @@ Simple local persistence for document metadata and OCR results.
 Storage layout (relative to backend working dir):
   doc_store/
     documents.json
+    audit_profiles.json
     ocr/
       {doc_id}.json
     chat/
@@ -35,6 +36,7 @@ class DocumentStore:
     def __init__(self, base_dir: str = "doc_store"):
         self.base_dir = Path(base_dir)
         self.index_path = self.base_dir / "documents.json"
+        self.audit_profiles_path = self.base_dir / "audit_profiles.json"
         self.ocr_dir = self.base_dir / "ocr"
         self.chat_dir = self.base_dir / "chat"
         self.compliance_dir = self.base_dir / "compliance"
@@ -294,6 +296,28 @@ class DocumentStore:
                     path.unlink()
             except Exception:
                 pass
+
+    def load_audit_profiles(self) -> Optional[Dict[str, Any]]:
+        self._ensure_dirs()
+        path = self.audit_profiles_path
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return None
+            profiles = data.get("profiles")
+            if not isinstance(profiles, list):
+                data["profiles"] = []
+            data.setdefault("version", 1)
+            return data
+        except Exception:
+            return None
+
+    def save_audit_profiles(self, payload: Dict[str, Any]) -> None:
+        with self._lock:
+            self._ensure_dirs()
+            _atomic_write_json(self.audit_profiles_path, payload)
 
     def save_ocr_result(self, doc_id: str, payload: Dict[str, Any]) -> None:
         with self._lock:

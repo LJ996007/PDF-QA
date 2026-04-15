@@ -88,6 +88,39 @@ def render_page_to_image(page: fitz.Page, dpi: int = 150) -> str:
     return base64.b64encode(buffer.read()).decode("utf-8")
 
 
+def estimate_embedded_image_ratio(page: fitz.Page) -> Tuple[float, float]:
+    """
+    Estimate how much of the page is occupied by embedded image blocks.
+
+    Returns: (total_image_area_ratio, largest_image_area_ratio)
+    """
+    text_dict = page.get_text("dict")
+    page_area = max(float(page.rect.width * page.rect.height), 1.0)
+    total_image_area = 0.0
+    largest_image_area = 0.0
+
+    for block in text_dict.get("blocks", []):
+        if block.get("type") != 1:
+            continue
+
+        bbox = block.get("bbox", [0, 0, 0, 0])
+        if len(bbox) < 4:
+            continue
+
+        width = max(float(bbox[2]) - float(bbox[0]), 0.0)
+        height = max(float(bbox[3]) - float(bbox[1]), 0.0)
+        area = width * height
+        if area <= 0:
+            continue
+
+        total_image_area += area
+        largest_image_area = max(largest_image_area, area)
+
+    total_ratio = min(total_image_area / page_area, 1.0)
+    largest_ratio = min(largest_image_area / page_area, 1.0)
+    return total_ratio, largest_ratio
+
+
 def generate_thumbnail(page: fitz.Page, size: int = 200) -> str:
     """生成页面缩略图"""
     # 计算缩放比例
@@ -110,35 +143,46 @@ def process_page(page: fitz.Page, page_number: int) -> PageContent:
     决策逻辑：
     1. 先提取原生文本（保留坐标）
     2. 检查文本密度和完整性
-    3. 若文本<100字符或包含大量乱码 -> 标记为需要OCR
+    3. 若文本<100字符、包含大量乱码，或页面中存在大面积扫描图 -> 标记为需要OCR
     """
     text, coordinates = extract_text_with_coordinates(page)
     char_count = len(text.replace(" ", "").replace("\n", ""))
-    
-    if char_count > 100 and not has_garbled_text(text):
-        # 原生文本足够，直接使用
-        # 更新坐标的页码
+    line_count = len([line for line in text.split("\n") if line.strip()])
+    garbled = has_garbled_text(text)
+    image_area_ratio, largest_image_ratio = estimate_embedded_image_ratio(page)
+
+    has_native_text = char_count > 0 and not garbled
+    needs_ocr = (
+        char_count <= 100
+        or garbled
+        or (largest_image_ratio >= 0.18 and char_count < 600)
+        or (image_area_ratio >= 0.30 and char_count < 1000 and line_count < 25)
+    )
+
+    if has_native_text:
         for coord in coordinates:
             coord.page = page_number
-        
+
         return PageContent(
             page_number=page_number,
             type="native",
             text=text,
             coordinates=coordinates,
-            confidence=1.0
+            confidence=0.75 if needs_ocr else 1.0,
+            image_base64=render_page_to_image(page) if needs_ocr else None,
+            needs_ocr=needs_ocr,
         )
-    else:
-        # 需要OCR处理
-        image_base64 = render_page_to_image(page)
-        return PageContent(
-            page_number=page_number,
-            type="ocr",
-            text="",
-            coordinates=None,
-            confidence=0.0,
-            image_base64=image_base64
-        )
+
+    image_base64 = render_page_to_image(page)
+    return PageContent(
+        page_number=page_number,
+        type="ocr",
+        text="",
+        coordinates=None,
+        confidence=0.0,
+        image_base64=image_base64,
+        needs_ocr=True,
+    )
 
 
 def process_document(pdf_path: str) -> Tuple[List[PageContent], List[str]]:
@@ -169,4 +213,4 @@ def process_document(pdf_path: str) -> Tuple[List[PageContent], List[str]]:
 
 def get_ocr_required_pages(pages: List[PageContent]) -> List[int]:
     """获取需要OCR的页码列表"""
-    return [p.page_number for p in pages if p.type == "ocr"]
+    return [p.page_number for p in pages if p.type == "ocr" or p.needs_ocr]

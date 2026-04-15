@@ -5,19 +5,30 @@ import io
 import os
 import sys
 
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BACKEND_DIR)
+
+# Ensure `from app...` imports resolve when launched as `uvicorn backend.main:app`
+# from the repository root.
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Load env vars from repository root .env
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
+# Prefer backend/.env to match the documented setup, then fall back to repo root.
+for env_path in (os.path.join(BACKEND_DIR, ".env"), os.path.join(PROJECT_ROOT, ".env")):
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+        break
 
 # Force UTF-8 stdout/stderr on Windows terminals.
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-from app.routers import chat, documents, ocr  # noqa: E402
+from app.routers import audit_profiles, chat, documents, ocr  # noqa: E402
 
 
 @asynccontextmanager
@@ -91,6 +102,7 @@ app.add_middleware(
 app.include_router(documents.router, prefix="/api/documents", tags=["documents"])
 app.include_router(ocr.router, prefix="/api/documents", tags=["ocr"])
 app.include_router(chat.router, prefix="/api", tags=["chat"])
+app.include_router(audit_profiles.router, prefix="/api/audit_profiles", tags=["audit_profiles"])
 
 
 @app.get("/")
@@ -101,3 +113,23 @@ async def root():
 @app.get("/api/health")
 async def health():
     return {"status": "healthy"}
+
+
+def _server_host() -> str:
+    host = (os.getenv("HOST") or "0.0.0.0").strip()
+    return host or "0.0.0.0"
+
+
+def _server_port() -> int:
+    raw_port = (os.getenv("PORT") or "8000").strip()
+    try:
+        port = int(raw_port)
+    except ValueError:
+        return 8000
+    return port if 1 <= port <= 65535 else 8000
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host=_server_host(), port=_server_port())

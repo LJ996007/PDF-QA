@@ -33,7 +33,23 @@ export interface ComplianceItem {
 export type PageOcrStatus = 'unrecognized' | 'processing' | 'recognized' | 'failed';
 export type ViewMode = 'list' | 'grid';
 export type RightPanelMode = 'chat' | 'compliance' | 'audit';
-export type AuditType = 'contract' | 'certificate' | 'personnel';
+export type LegacyAuditType = 'contract' | 'certificate' | 'personnel';
+
+export interface AuditProfileRule {
+    id: string;
+    title: string;
+    instruction: string;
+    enabled: boolean;
+}
+
+export interface AuditProfile {
+    id: string;
+    name: string;
+    bidderNameRequired: boolean;
+    rules: AuditProfileRule[];
+    createdAt: string;
+    updatedAt: string;
+}
 
 export interface MultimodalAuditItem {
     checkKey: string;
@@ -62,15 +78,21 @@ export interface MultimodalAuditProgress {
 }
 
 export interface MultimodalAuditState {
-    auditType: AuditType;
+    selectedAuditProfileId: string;
+    auditProfiles: AuditProfile[];
+    auditProfileDraft: AuditProfile | null;
+    auditProfileDraftIsNew: boolean;
     bidderName: string;
     allowedPagesText: string;
-    customChecksText: string;
     items: MultimodalAuditItem[];
     summary: MultimodalAuditSummary;
     progress: MultimodalAuditProgress | null;
     lastJobId: string;
     generatedAt: string;
+    lastAuditProfileId: string;
+    lastAuditProfileName: string;
+    lastAuditProfileSnapshot: AuditProfile | null;
+    legacyAuditType: LegacyAuditType | '';
 }
 
 export interface Document {
@@ -116,6 +138,7 @@ export interface AppConfig {
     ocrProvider: 'baidu';
     deepseekApiKey: string;
     dashscopeApiKey: string;
+    qwenVlModel: string;
     theme: 'light' | 'dark';
     pdfScale: number;
     selectedPromptId: string;
@@ -160,6 +183,7 @@ const DEFAULT_CONFIG: AppConfig = {
     ocrProvider: 'baidu',
     deepseekApiKey: '',
     dashscopeApiKey: '',
+    qwenVlModel: '',
     theme: 'light',
     pdfScale: 1,
     selectedPromptId: '',
@@ -233,27 +257,95 @@ const createEmptyAuditSummary = (): MultimodalAuditSummary => ({
     total: 0,
 });
 
+const normalizeAuditProfileRule = (rule: unknown, index: number): AuditProfileRule | null => {
+    if (!rule || typeof rule !== 'object') return null;
+    const raw = rule as Partial<AuditProfileRule> & {
+        instruction?: unknown;
+        enabled?: unknown;
+    };
+    const id = String(raw.id || `rule_${index + 1}`);
+    const title = String(raw.title || '').trim();
+    const instruction = String(raw.instruction || '').trim();
+    if (!title || !instruction) return null;
+    return {
+        id,
+        title,
+        instruction,
+        enabled: raw.enabled !== false,
+    };
+};
+
+const normalizeAuditProfile = (profile: unknown): AuditProfile | null => {
+    if (!profile || typeof profile !== 'object') return null;
+    const raw = profile as Partial<AuditProfile> & {
+        bidder_name_required?: unknown;
+        bidderNameRequired?: unknown;
+        created_at?: unknown;
+        updated_at?: unknown;
+        createdAt?: unknown;
+        updatedAt?: unknown;
+        rules?: unknown;
+    };
+    const id = String(raw.id || '').trim();
+    const name = String(raw.name || '').trim();
+    const rulesRaw = Array.isArray(raw.rules) ? raw.rules : [];
+    const rules = rulesRaw
+        .map((rule, index) => normalizeAuditProfileRule(rule, index))
+        .filter((rule): rule is AuditProfileRule => Boolean(rule));
+    if (!id || !name || rules.length === 0) return null;
+    return {
+        id,
+        name,
+        bidderNameRequired: Boolean(raw.bidderNameRequired ?? raw.bidder_name_required),
+        rules,
+        createdAt: String(raw.createdAt || raw.created_at || ''),
+        updatedAt: String(raw.updatedAt || raw.updated_at || ''),
+    };
+};
+
+const cloneAuditProfile = (profile: AuditProfile): AuditProfile => ({
+    ...profile,
+    rules: profile.rules.map((rule) => ({ ...rule })),
+});
+
 const createDefaultAuditState = (): MultimodalAuditState => ({
-    auditType: 'contract',
+    selectedAuditProfileId: '',
+    auditProfiles: [],
+    auditProfileDraft: null,
+    auditProfileDraftIsNew: false,
     bidderName: '',
     allowedPagesText: '',
-    customChecksText: '',
     items: [],
     summary: createEmptyAuditSummary(),
     progress: null,
     lastJobId: '',
     generatedAt: '',
+    lastAuditProfileId: '',
+    lastAuditProfileName: '',
+    lastAuditProfileSnapshot: null,
+    legacyAuditType: '',
 });
 
 const normalizeAuditState = (audit: unknown): MultimodalAuditState => {
     const base = createDefaultAuditState();
     if (!audit || typeof audit !== 'object') return base;
     const raw = audit as Partial<MultimodalAuditState>;
-    const type = raw.auditType;
-    const auditType: AuditType =
-        type === 'certificate' || type === 'personnel' || type === 'contract'
-            ? type
-            : 'contract';
+    const profilesRaw = Array.isArray(raw.auditProfiles) ? raw.auditProfiles : [];
+    const auditProfiles = profilesRaw
+        .map((profile) => normalizeAuditProfile(profile))
+        .filter((profile): profile is AuditProfile => Boolean(profile));
+    const selectedFromLegacy = (raw as { auditType?: unknown }).auditType;
+    const legacyAuditType: LegacyAuditType | '' =
+        selectedFromLegacy === 'certificate' || selectedFromLegacy === 'personnel' || selectedFromLegacy === 'contract'
+            ? selectedFromLegacy
+            : raw.legacyAuditType === 'certificate' || raw.legacyAuditType === 'personnel' || raw.legacyAuditType === 'contract'
+                ? raw.legacyAuditType
+                : '';
+    const selectedAuditProfileId = String(raw.selectedAuditProfileId || legacyAuditType || '');
+    const selectedProfile = auditProfiles.find((profile) => profile.id === selectedAuditProfileId) || auditProfiles[0] || null;
+    const normalizedSelectedAuditProfileId = selectedProfile?.id || selectedAuditProfileId;
+    const auditProfileDraft = normalizeAuditProfile(raw.auditProfileDraft)
+        || (selectedProfile ? cloneAuditProfile(selectedProfile) : null);
     const itemsRaw = Array.isArray(raw.items) ? raw.items : [];
     const items: MultimodalAuditItem[] = itemsRaw.map((item: any, idx: number) => ({
         checkKey: String(item?.checkKey || item?.check_key || `item_${idx + 1}`),
@@ -292,15 +384,21 @@ const normalizeAuditState = (audit: unknown): MultimodalAuditState => {
     }
 
     return {
-        auditType,
+        selectedAuditProfileId: normalizedSelectedAuditProfileId,
+        auditProfiles,
+        auditProfileDraft,
+        auditProfileDraftIsNew: Boolean(raw.auditProfileDraftIsNew),
         bidderName: String(raw.bidderName || ''),
         allowedPagesText: String(raw.allowedPagesText || ''),
-        customChecksText: String(raw.customChecksText || ''),
         items,
         summary,
         progress,
         lastJobId: String(raw.lastJobId || ''),
         generatedAt: String(raw.generatedAt || ''),
+        lastAuditProfileId: String(raw.lastAuditProfileId || normalizedSelectedAuditProfileId || ''),
+        lastAuditProfileName: String(raw.lastAuditProfileName || ''),
+        lastAuditProfileSnapshot: normalizeAuditProfile(raw.lastAuditProfileSnapshot),
+        legacyAuditType,
     };
 };
 
@@ -893,7 +991,7 @@ export const useDocumentStore = create<DocumentState>()(
         })),
         {
             name: 'pdf-qa-storage',
-            version: 3,
+            version: 4,
             migrate: (persistedState: unknown) => {
                 if (!persistedState || typeof persistedState !== 'object') {
                     return persistedState as DocumentState;

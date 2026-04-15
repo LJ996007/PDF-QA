@@ -110,6 +110,7 @@ body {
 .right-panel-content {
   flex: 1;
   overflow: hidden;
+  min-height: 0;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -422,6 +423,7 @@ body {
 .chat-section {
   flex: 1;
   min-width: 250px;
+  min-height: 0;
   background: var(--bg-primary);
   border-left: none;
   display: flex;

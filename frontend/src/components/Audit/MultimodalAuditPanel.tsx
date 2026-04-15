@@ -1,6 +1,7 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useDocumentStore } from '../../stores/documentStore';
-import type { AuditType, MultimodalAuditItem, TextChunk } from '../../stores/documentStore';
+import type { AuditProfile, MultimodalAuditItem, TextChunk } from '../../stores/documentStore';
+import type { AuditProfilePayload } from '../../hooks/useVectorSearch';
 import { useVectorSearch } from '../../hooks/useVectorSearch';
 import './MultimodalAuditPanel.css';
 
@@ -15,7 +16,7 @@ const parseAllowedPages = (raw: string): number[] => {
             const start = Number(rangeMatch[1]);
             const end = Number(rangeMatch[2]);
             if (Number.isInteger(start) && Number.isInteger(end) && start > 0 && end >= start) {
-                for (let p = start; p <= end; p += 1) result.add(p);
+                for (let page = start; page <= end; page += 1) result.add(page);
             }
             continue;
         }
@@ -24,9 +25,6 @@ const parseAllowedPages = (raw: string): number[] => {
     }
     return Array.from(result).sort((a, b) => a - b);
 };
-
-const parseCustomChecks = (raw: string): string[] =>
-    raw.split('\n').map((line) => line.trim()).filter(Boolean);
 
 const statusLabel = (status: MultimodalAuditItem['status']): string => {
     if (status === 'pass') return '通过';
@@ -42,6 +40,60 @@ const statusClass = (status: MultimodalAuditItem['status']): string => {
     return 'status-review';
 };
 
+const cloneAuditProfile = (profile: AuditProfile): AuditProfile => ({
+    ...profile,
+    rules: profile.rules.map((rule) => ({ ...rule })),
+});
+
+const buildPayloadFromDraft = (profile: AuditProfile): AuditProfilePayload => ({
+    name: profile.name.trim(),
+    bidder_name_required: profile.bidderNameRequired,
+    rules: profile.rules.map((rule) => ({
+        id: rule.id.trim(),
+        title: rule.title.trim(),
+        instruction: rule.instruction.trim(),
+        enabled: rule.enabled,
+    })),
+});
+
+const createLocalRule = (index: number) => ({
+    id: `rule_${Date.now()}_${index}`,
+    title: '',
+    instruction: '',
+    enabled: true,
+});
+
+const createLocalProfileDraft = (existingProfiles: AuditProfile[]): AuditProfile => {
+    const nextIndex = existingProfiles.length + 1;
+    return {
+        id: `draft_${Date.now()}`,
+        name: `新建审核模板 ${nextIndex}`,
+        bidderNameRequired: false,
+        rules: [createLocalRule(1)],
+        createdAt: '',
+        updatedAt: '',
+    };
+};
+
+const buildAuditStateFromProfiles = (
+    profiles: AuditProfile[],
+    preferredId: string,
+    fallbackLegacyId: string
+) => {
+    const selected =
+        profiles.find((profile) => profile.id === preferredId)
+        || profiles.find((profile) => profile.id === fallbackLegacyId)
+        || profiles[0]
+        || null;
+
+    return {
+        auditProfiles: profiles,
+        selectedAuditProfileId: selected?.id || '',
+        auditProfileDraft: selected ? cloneAuditProfile(selected) : null,
+        auditProfileDraftIsNew: false,
+    };
+};
+
 export const MultimodalAuditPanel: React.FC = () => {
     const {
         currentDocument,
@@ -52,12 +104,51 @@ export const MultimodalAuditPanel: React.FC = () => {
         setCurrentPage,
     } = useDocumentStore();
     const {
+        getAuditProfiles,
+        createAuditProfile,
+        updateAuditProfile,
+        deleteAuditProfile,
         createMultimodalAuditJob,
         watchMultimodalAuditProgress,
         getMultimodalAuditJobResult,
     } = useVectorSearch();
 
+    const [profilesLoading, setProfilesLoading] = useState(false);
+    const [profileBusy, setProfileBusy] = useState(false);
+    const [profileError, setProfileError] = useState('');
     const unwatchRef = useRef<(() => void) | null>(null);
+
+    const selectedSavedProfile = useMemo(
+        () => audit.auditProfiles.find((profile) => profile.id === audit.selectedAuditProfileId) || null,
+        [audit.auditProfiles, audit.selectedAuditProfileId]
+    );
+    const currentDraft = audit.auditProfileDraft;
+    const requiresBidderName = currentDraft?.bidderNameRequired || selectedSavedProfile?.bidderNameRequired || false;
+    const isRunning = audit.progress?.status === 'queued' || audit.progress?.status === 'running';
+
+    const isDraftDirty = useMemo(() => {
+        if (!currentDraft) return false;
+        if (audit.auditProfileDraftIsNew) return true;
+        if (!selectedSavedProfile) return false;
+        return JSON.stringify(buildPayloadFromDraft(currentDraft)) !== JSON.stringify(buildPayloadFromDraft(selectedSavedProfile));
+    }, [audit.auditProfileDraftIsNew, currentDraft, selectedSavedProfile]);
+
+    const loadProfiles = async (preferredId?: string) => {
+        setProfilesLoading(true);
+        setProfileError('');
+        try {
+            const profiles = await getAuditProfiles();
+            setAuditState(buildAuditStateFromProfiles(
+                profiles,
+                preferredId || audit.selectedAuditProfileId || audit.lastAuditProfileId,
+                audit.legacyAuditType
+            ));
+        } catch (error) {
+            setProfileError(error instanceof Error ? error.message : '加载审核模板失败');
+        } finally {
+            setProfilesLoading(false);
+        }
+    };
 
     useEffect(() => {
         return () => {
@@ -69,10 +160,12 @@ export const MultimodalAuditPanel: React.FC = () => {
     }, []);
 
     useEffect(() => {
+        void loadProfiles();
         if (unwatchRef.current) {
             unwatchRef.current();
             unwatchRef.current = null;
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [currentDocument?.id]);
 
     const handleRefClick = (refId: string) => {
@@ -114,17 +207,171 @@ export const MultimodalAuditPanel: React.FC = () => {
         });
     };
 
+    const validateDraft = (profile: AuditProfile | null): string => {
+        if (!profile) return '请先选择或创建审核模板';
+        if (!profile.name.trim()) return '模板名称不能为空';
+        if (profile.rules.length === 0) return '至少保留一条审核项';
+        if (!profile.rules.some((rule) => rule.enabled)) return '至少启用一条审核项';
+        for (const rule of profile.rules) {
+            if (!rule.title.trim()) return '审核项标题不能为空';
+            if (!rule.instruction.trim()) return `审核项“${rule.title || rule.id}”的审核说明不能为空`;
+        }
+        return '';
+    };
+
+    const handleProfileSelect = (profileId: string) => {
+        const selected = audit.auditProfiles.find((profile) => profile.id === profileId);
+        if (!selected) return;
+        setAuditState({
+            selectedAuditProfileId: profileId,
+            auditProfileDraft: cloneAuditProfile(selected),
+            auditProfileDraftIsNew: profileId.startsWith('draft_'),
+        });
+        setProfileError('');
+    };
+
+    const updateDraft = (updater: (draft: AuditProfile) => AuditProfile) => {
+        if (!currentDraft) return;
+        setAuditState({ auditProfileDraft: updater(cloneAuditProfile(currentDraft)) });
+    };
+
+    const handleCreateProfile = () => {
+        const draft = createLocalProfileDraft(audit.auditProfiles);
+        setAuditState({
+            auditProfiles: [...audit.auditProfiles, draft],
+            selectedAuditProfileId: draft.id,
+            auditProfileDraft: cloneAuditProfile(draft),
+            auditProfileDraftIsNew: true,
+        });
+        setProfileError('');
+    };
+
+    const handleSaveProfile = async () => {
+        const validationMessage = validateDraft(currentDraft);
+        if (validationMessage) {
+            window.alert(validationMessage);
+            return;
+        }
+        if (!currentDraft) return;
+
+        setProfileBusy(true);
+        setProfileError('');
+        try {
+            const payload = buildPayloadFromDraft(currentDraft);
+            const saved = audit.auditProfileDraftIsNew
+                ? await createAuditProfile(payload)
+                : await updateAuditProfile(currentDraft.id, payload);
+            await loadProfiles(saved.id);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : '保存审核模板失败';
+            setProfileError(message);
+            window.alert(message);
+        } finally {
+            setProfileBusy(false);
+        }
+    };
+
+    const handleSaveAsProfile = async () => {
+        const validationMessage = validateDraft(currentDraft);
+        if (validationMessage) {
+            window.alert(validationMessage);
+            return;
+        }
+        if (!currentDraft) return;
+
+        setProfileBusy(true);
+        setProfileError('');
+        try {
+            const payload = buildPayloadFromDraft({
+                ...currentDraft,
+                name: currentDraft.name.trim().endsWith('副本')
+                    ? currentDraft.name.trim()
+                    : `${currentDraft.name.trim()} 副本`,
+            });
+            const created = await createAuditProfile(payload);
+            await loadProfiles(created.id);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : '另存为审核模板失败';
+            setProfileError(message);
+            window.alert(message);
+        } finally {
+            setProfileBusy(false);
+        }
+    };
+
+    const handleDeleteProfile = async () => {
+        if (!currentDraft) return;
+        const confirmed = window.confirm(`确定删除审核模板“${currentDraft.name}”吗？`);
+        if (!confirmed) return;
+
+        if (audit.auditProfileDraftIsNew) {
+            const remaining = audit.auditProfiles.filter((profile) => profile.id !== currentDraft.id);
+            if (remaining.length === 0) {
+                window.alert('至少保留一个审核模板');
+                return;
+            }
+            const nextSelected = remaining[0];
+            setAuditState({
+                auditProfiles: remaining,
+                selectedAuditProfileId: nextSelected.id,
+                auditProfileDraft: cloneAuditProfile(nextSelected),
+                auditProfileDraftIsNew: false,
+            });
+            return;
+        }
+
+        setProfileBusy(true);
+        setProfileError('');
+        try {
+            await deleteAuditProfile(currentDraft.id);
+            const remainingSaved = audit.auditProfiles.filter((profile) => profile.id !== currentDraft.id);
+            await loadProfiles(remainingSaved[0]?.id || '');
+        } catch (error) {
+            const message = error instanceof Error ? error.message : '删除审核模板失败';
+            setProfileError(message);
+            window.alert(message);
+        } finally {
+            setProfileBusy(false);
+        }
+    };
+
+    const handleAddRule = () => {
+        updateDraft((draft) => ({
+            ...draft,
+            rules: [...draft.rules, createLocalRule(draft.rules.length + 1)],
+        }));
+    };
+
+    const handleRemoveRule = (ruleId: string) => {
+        updateDraft((draft) => ({
+            ...draft,
+            rules: draft.rules.filter((rule) => rule.id !== ruleId),
+        }));
+    };
+
     const submitAudit = async () => {
         if (!currentDocument) return;
-        const auditType: AuditType = audit.auditType;
+        const validationMessage = validateDraft(currentDraft);
+        if (validationMessage) {
+            window.alert(validationMessage);
+            return;
+        }
+        if (isDraftDirty) {
+            window.alert('当前审核模板有未保存的修改，请先保存后再启动专项审核。');
+            return;
+        }
+        if (!selectedSavedProfile) {
+            window.alert('请先选择已保存的审核模板');
+            return;
+        }
+
         const bidderName = audit.bidderName.trim();
-        if ((auditType === 'certificate' || auditType === 'personnel') && !bidderName) {
-            window.alert('证件和人员资质审核必须填写投标人名称');
+        if (requiresBidderName && !bidderName) {
+            window.alert('当前审核模板要求填写投标人名称');
             return;
         }
 
         const allowedPages = parseAllowedPages(audit.allowedPagesText);
-        const customChecks = parseCustomChecks(audit.customChecksText);
 
         setAuditState({
             progress: {
@@ -135,14 +382,17 @@ export const MultimodalAuditPanel: React.FC = () => {
                 total: 100,
                 message: '正在创建审核任务...',
             },
+            lastAuditProfileId: selectedSavedProfile.id,
+            lastAuditProfileName: selectedSavedProfile.name,
+            lastAuditProfileSnapshot: cloneAuditProfile(selectedSavedProfile),
         });
 
         const created = await createMultimodalAuditJob(currentDocument.id, {
-            audit_type: auditType,
+            audit_profile_id: selectedSavedProfile.id,
             bidder_name: bidderName,
             allowed_pages: allowedPages,
-            custom_checks: customChecks,
             api_key: config.dashscopeApiKey || undefined,
+            model: config.qwenVlModel || undefined,
         });
         if (!created) {
             setAuditState({
@@ -195,6 +445,10 @@ export const MultimodalAuditPanel: React.FC = () => {
                         items: result.items,
                         summary: result.summary,
                         generatedAt: result.generatedAt,
+                        lastAuditProfileId: result.auditProfileId || selectedSavedProfile.id,
+                        lastAuditProfileName: result.auditProfileName || selectedSavedProfile.name,
+                        lastAuditProfileSnapshot: result.auditProfileSnapshot || cloneAuditProfile(selectedSavedProfile),
+                        legacyAuditType: result.legacyAuditType,
                         progress: {
                             jobId: result.jobId,
                             status: 'completed',
@@ -209,32 +463,61 @@ export const MultimodalAuditPanel: React.FC = () => {
         });
     };
 
-    const isRunning = audit.progress?.status === 'queued' || audit.progress?.status === 'running';
-
     return (
         <div className="audit-panel">
-            <div className="audit-form">
-                <label className="audit-field">
-                    <span>审核类型</span>
+            <div className="audit-form audit-form-top">
+                <label className="audit-field audit-field-grow">
+                    <span>审核模板</span>
                     <select
-                        value={audit.auditType}
-                        onChange={(e) => setAuditState({ auditType: e.target.value as AuditType })}
-                        disabled={isRunning}
+                        value={audit.selectedAuditProfileId}
+                        onChange={(e) => handleProfileSelect(e.target.value)}
+                        disabled={profilesLoading || profileBusy}
                     >
-                        <option value="contract">合同扫描件审核</option>
-                        <option value="certificate">证件扫描件审核</option>
-                        <option value="personnel">人员资质审核</option>
+                        {audit.auditProfiles.map((profile) => (
+                            <option key={profile.id} value={profile.id}>
+                                {profile.name}
+                            </option>
+                        ))}
                     </select>
                 </label>
+
+                <div className="audit-profile-actions">
+                    <button type="button" className="audit-secondary-btn" onClick={handleCreateProfile} disabled={profileBusy || profilesLoading || isRunning}>
+                        新建
+                    </button>
+                    <button type="button" className="audit-secondary-btn" onClick={handleSaveAsProfile} disabled={profileBusy || profilesLoading || !currentDraft || isRunning}>
+                        另存为
+                    </button>
+                    <button type="button" className="audit-secondary-btn primary" onClick={handleSaveProfile} disabled={profileBusy || profilesLoading || !currentDraft || isRunning}>
+                        保存
+                    </button>
+                    <button type="button" className="audit-secondary-btn danger" onClick={handleDeleteProfile} disabled={profileBusy || profilesLoading || !currentDraft || isRunning}>
+                        删除
+                    </button>
+                </div>
+            </div>
+
+            <div className="audit-form">
+                <label className="audit-field">
+                    <span>模板名称</span>
+                    <input
+                        value={currentDraft?.name || ''}
+                        onChange={(e) => updateDraft((draft) => ({ ...draft, name: e.target.value }))}
+                        placeholder="请输入审核模板名称"
+                        disabled={!currentDraft || profileBusy || profilesLoading || isRunning}
+                    />
+                </label>
+
                 <label className="audit-field">
                     <span>投标人名称</span>
                     <input
                         value={audit.bidderName}
                         onChange={(e) => setAuditState({ bidderName: e.target.value })}
-                        placeholder="证件/资质审核必填"
+                        placeholder={requiresBidderName ? '当前模板审核时必填' : '按需填写'}
                         disabled={isRunning}
                     />
                 </label>
+
                 <label className="audit-field">
                     <span>页范围</span>
                     <input
@@ -244,24 +527,119 @@ export const MultimodalAuditPanel: React.FC = () => {
                         disabled={isRunning}
                     />
                 </label>
-                <label className="audit-field">
-                    <span>自定义补充规则</span>
-                    <textarea
-                        value={audit.customChecksText}
-                        onChange={(e) => setAuditState({ customChecksText: e.target.value })}
-                        placeholder="每行一条"
-                        rows={3}
-                        disabled={isRunning}
-                    />
+
+                <label className="audit-field audit-checkbox-field">
+                    <span>模板设置</span>
+                    <label className="audit-checkbox-row">
+                        <input
+                            type="checkbox"
+                            checked={currentDraft?.bidderNameRequired || false}
+                            onChange={(e) => updateDraft((draft) => ({ ...draft, bidderNameRequired: e.target.checked }))}
+                            disabled={!currentDraft || profileBusy || profilesLoading || isRunning}
+                        />
+                        <span>启动审核时要求填写投标人名称</span>
+                    </label>
                 </label>
+
+                <div className="audit-rules-section">
+                    <div className="audit-rules-header">
+                        <div>
+                            <span className="audit-rules-title">审核内容</span>
+                            <p className="audit-rules-hint">每条审核项都会参与专项审查并写入模板，保存后永久生效。</p>
+                        </div>
+                        <button
+                            type="button"
+                            className="audit-secondary-btn"
+                            onClick={handleAddRule}
+                            disabled={!currentDraft || profileBusy || profilesLoading || isRunning}
+                        >
+                            新增审核项
+                        </button>
+                    </div>
+
+                    <div className="audit-rule-list">
+                        {currentDraft?.rules.map((rule, index) => (
+                            <div key={rule.id} className="audit-rule-card">
+                                <div className="audit-rule-card-header">
+                                    <span className="audit-rule-index">审核项 {index + 1}</span>
+                                    <label className="audit-checkbox-row">
+                                        <input
+                                            type="checkbox"
+                                            checked={rule.enabled}
+                                            onChange={(e) => updateDraft((draft) => ({
+                                                ...draft,
+                                                rules: draft.rules.map((item) => item.id === rule.id ? { ...item, enabled: e.target.checked } : item),
+                                            }))}
+                                            disabled={profileBusy || profilesLoading || isRunning}
+                                        />
+                                        <span>启用</span>
+                                    </label>
+                                    <button
+                                        type="button"
+                                        className="audit-rule-remove"
+                                        onClick={() => handleRemoveRule(rule.id)}
+                                        disabled={profileBusy || profilesLoading || isRunning || (currentDraft?.rules.length || 0) <= 1}
+                                    >
+                                        删除
+                                    </button>
+                                </div>
+
+                                <label className="audit-field">
+                                    <span>审核项标题</span>
+                                    <input
+                                        value={rule.title}
+                                        onChange={(e) => updateDraft((draft) => ({
+                                            ...draft,
+                                            rules: draft.rules.map((item) => item.id === rule.id ? { ...item, title: e.target.value } : item),
+                                        }))}
+                                        placeholder="例如：证书有效期核验"
+                                        disabled={profileBusy || profilesLoading || isRunning}
+                                    />
+                                </label>
+
+                                <label className="audit-field">
+                                    <span>审核说明</span>
+                                    <textarea
+                                        value={rule.instruction}
+                                        onChange={(e) => updateDraft((draft) => ({
+                                            ...draft,
+                                            rules: draft.rules.map((item) => item.id === rule.id ? { ...item, instruction: e.target.value } : item),
+                                        }))}
+                                        placeholder="描述该审核项要检查什么、如何判断通过或不通过"
+                                        rows={3}
+                                        disabled={profileBusy || profilesLoading || isRunning}
+                                    />
+                                </label>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
                 <button
                     className="audit-submit-btn"
                     onClick={submitAudit}
-                    disabled={!currentDocument || isRunning}
+                    disabled={!currentDocument || isRunning || profilesLoading || profileBusy || !currentDraft}
                 >
                     {isRunning ? '审核中...' : '启动专项审核'}
                 </button>
             </div>
+
+            {(profilesLoading || profileError || isDraftDirty) && (
+                <div className={`audit-profile-banner ${profileError ? 'error' : isDraftDirty ? 'warning' : ''}`}>
+                    {profilesLoading
+                        ? '正在加载审核模板...'
+                        : profileError
+                            ? profileError
+                            : '当前模板有未保存的修改，保存后才会用于后续专项审核。'}
+                </div>
+            )}
+
+            {(audit.lastAuditProfileName || audit.generatedAt) && (
+                <div className="audit-meta-banner">
+                    {audit.lastAuditProfileName ? `最近结果模板：${audit.lastAuditProfileName}` : '最近结果模板：未记录'}
+                    {audit.generatedAt ? ` ｜ 生成时间：${new Date(audit.generatedAt).toLocaleString()}` : ''}
+                </div>
+            )}
 
             {audit.progress && (
                 <div className="audit-progress">

@@ -49,6 +49,54 @@ def _run_command(cmd: Sequence[str], timeout_sec: int = 180) -> Tuple[bool, str]
     return False, details
 
 
+def _convert_with_mammoth_fitz(input_path: str, output_pdf_path: str) -> Tuple[bool, str]:
+    """Pure-Python: mammoth (docx→HTML) + PyMuPDF Story (HTML→PDF)."""
+    try:
+        import mammoth  # type: ignore
+        import fitz  # type: ignore
+    except ImportError as exc:
+        return False, f"missing dependency: {exc}"
+    try:
+        with open(input_path, "rb") as fh:
+            result = mammoth.convert_to_html(fh)
+        html = result.value or ""
+        if not html.strip():
+            return False, "mammoth returned empty HTML"
+        full_html = f"<html><body>{html}</body></html>"
+        story = fitz.Story(html=full_html)
+        writer = fitz.DocumentWriter(output_pdf_path)
+        mediabox = fitz.paper_rect("a4")
+        margin = 50
+        where = mediabox + (margin, margin, -margin, -margin)
+        more = True
+        while more:
+            dev = writer.begin_page(mediabox)
+            more, _ = story.place(where)
+            story.draw(dev)
+            writer.end_page()
+        writer.close()
+        if Path(output_pdf_path).exists():
+            return True, ""
+        return False, "mammoth+fitz finished but output file not found"
+    except Exception as exc:
+        return False, f"mammoth+fitz failed: {exc}"
+
+
+def _convert_with_docx2pdf(input_path: str, output_pdf_path: str) -> Tuple[bool, str]:
+    """Use docx2pdf (Word COM on Windows, LibreOffice on macOS/Linux) to convert."""
+    try:
+        from docx2pdf import convert  # type: ignore
+    except ImportError:
+        return False, "docx2pdf not installed"
+    try:
+        convert(input_path, output_pdf_path)
+        if Path(output_pdf_path).exists():
+            return True, ""
+        return False, "docx2pdf finished but output file not found"
+    except Exception as exc:
+        return False, f"docx2pdf failed: {exc}"
+
+
 def _convert_with_unoserver(input_path: str, output_pdf_path: str) -> Tuple[bool, str]:
     unoconvert = shutil.which("unoconvert")
     if not unoconvert:
@@ -104,6 +152,8 @@ def convert_to_pdf(input_path: str, output_pdf_path: str) -> ConversionResult:
     errors: List[str] = []
 
     for engine, fn in (
+        ("mammoth+fitz", _convert_with_mammoth_fitz),
+        ("docx2pdf", _convert_with_docx2pdf),
         ("unoserver", _convert_with_unoserver),
         ("soffice", _convert_with_soffice),
     ):

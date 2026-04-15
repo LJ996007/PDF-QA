@@ -7,7 +7,7 @@ import { Settings } from './components/Settings';
 import { useDocumentStore } from './stores/documentStore';
 import type { Document, PageOcrStatus, TabProgress } from './stores/documentStore';
 import { useVectorSearch } from './hooks/useVectorSearch';
-import type { HistoryDocumentItem } from './hooks/useVectorSearch';
+import type { HistoryDocumentItem, MultimodalAuditJobResult } from './hooks/useVectorSearch';
 import { sha256File } from './utils/hash';
 import './App.css';
 
@@ -117,6 +117,26 @@ const getBackgroundOcrPages = (doc: Document): number[] => {
     .filter((page) => Number.isInteger(page) && page > 0)
     .sort((a, b) => a - b);
 };
+
+const createAuditHistoryState = (auditHistory: MultimodalAuditJobResult) => ({
+  lastJobId: auditHistory.jobId,
+  selectedAuditProfileId: auditHistory.auditProfileId || auditHistory.legacyAuditType || '',
+  items: auditHistory.items,
+  summary: auditHistory.summary,
+  generatedAt: auditHistory.generatedAt,
+  lastAuditProfileId: auditHistory.auditProfileId || auditHistory.legacyAuditType || '',
+  lastAuditProfileName: auditHistory.auditProfileName || '',
+  lastAuditProfileSnapshot: auditHistory.auditProfileSnapshot,
+  legacyAuditType: auditHistory.legacyAuditType,
+  progress: {
+    jobId: auditHistory.jobId,
+    status: auditHistory.status,
+    stage: auditHistory.status,
+    current: 100,
+    total: 100,
+    message: '已加载审查历史。',
+  } as const,
+});
 
 interface UploadOneOptions {
   silent?: boolean;
@@ -327,21 +347,7 @@ function App() {
           });
         }
         if (auditHistory) {
-          setTabAudit(docId, {
-            lastJobId: auditHistory.jobId,
-            auditType: auditHistory.auditType,
-            items: auditHistory.items,
-            summary: auditHistory.summary,
-            generatedAt: auditHistory.generatedAt,
-            progress: {
-              jobId: auditHistory.jobId,
-              status: auditHistory.status,
-              stage: auditHistory.status,
-              current: 100,
-              total: 100,
-              message: '已加载审查历史。',
-            },
-          });
+          setTabAudit(docId, createAuditHistoryState(auditHistory));
         }
 
         const tab = useDocumentStore.getState().tabsByDocId[docId];
@@ -423,22 +429,11 @@ function App() {
             });
           }
           if (auditHistory) {
-            setTabAudit(lookup.doc_id, {
-              lastJobId: auditHistory.jobId,
-              auditType: auditHistory.auditType,
-              items: auditHistory.items,
-              summary: auditHistory.summary,
-              generatedAt: auditHistory.generatedAt,
-              progress: {
-                jobId: auditHistory.jobId,
-                status: auditHistory.status,
-                stage: auditHistory.status,
-                current: 100,
-                total: 100,
-                message: '已加载审查历史。',
-              },
-            });
+            setTabAudit(lookup.doc_id, createAuditHistoryState(auditHistory));
           }
+        }
+        if (lookup.status !== 'processing') {
+          setTabProgress(lookup.doc_id, null);
         }
         ensureProgressWatch(lookup.doc_id);
         await refreshHistory();
@@ -446,9 +441,6 @@ function App() {
       }
 
       const docId = await uploadDocument(file, ocrMode);
-      if (!docId) {
-        throw new Error('上传失败');
-      }
 
       const url = isPdfFilename(file.name) ? URL.createObjectURL(file) : null;
       openOrFocusTab(
@@ -635,6 +627,7 @@ function App() {
 
   const openHistoryInCurrentTab = useCallback(async (docId: string, options?: OpenHistoryOptions) => {
     const existing = tabsByDocId[docId];
+    const historyStatus = historyDocs.find((item) => item.doc_id === docId)?.status;
     if (existing) {
       activateTab(docId);
     }
@@ -672,23 +665,12 @@ function App() {
         });
       }
       if (auditHistory) {
-        setTabAudit(docId, {
-          lastJobId: auditHistory.jobId,
-          auditType: auditHistory.auditType,
-          items: auditHistory.items,
-          summary: auditHistory.summary,
-          generatedAt: auditHistory.generatedAt,
-          progress: {
-            jobId: auditHistory.jobId,
-            status: auditHistory.status,
-            stage: auditHistory.status,
-            current: 100,
-            total: 100,
-            message: '已加载审查历史。',
-          },
-        });
+        setTabAudit(docId, createAuditHistoryState(auditHistory));
       }
 
+      if (historyStatus !== 'processing') {
+        setTabProgress(docId, null);
+      }
       ensureProgressWatch(docId);
 
       if (!pdf && !options?.suppressMissingPdfAlert) {
@@ -709,7 +691,9 @@ function App() {
     setTabMessages,
     setTabCompliance,
     setTabAudit,
+    setTabProgress,
     ensureProgressWatch,
+    historyDocs,
   ]);
 
   useEffect(() => {

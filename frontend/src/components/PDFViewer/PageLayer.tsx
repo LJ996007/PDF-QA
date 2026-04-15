@@ -4,11 +4,18 @@ import type { PDFLoadResult } from '../../hooks/usePdfLoader';
 import type { TextChunk } from '../../stores/documentStore';
 import { HighlightLayer } from './HighlightLayer';
 
+export interface SearchHighlightItem {
+    bbox: { x: number; y: number; w: number; h: number };
+    text: string;
+    isCurrent: boolean;
+}
+
 interface PageLayerProps {
     pageNumber: number;
     scale: number;
     pdfResult: PDFLoadResult;
     highlights: TextChunk[];
+    searchHighlights?: SearchHighlightItem[];
 }
 
 export const PageLayer: React.FC<PageLayerProps> = memo(({
@@ -16,6 +23,7 @@ export const PageLayer: React.FC<PageLayerProps> = memo(({
     scale,
     pdfResult,
     highlights,
+    searchHighlights,
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const textLayerRef = useRef<HTMLDivElement>(null);
@@ -130,6 +138,34 @@ export const PageLayer: React.FC<PageLayerProps> = memo(({
                     pageHeight={pageSize.height}
                     scale={scale}
                 />
+            )}
+
+            {isRendered && searchHighlights && searchHighlights.length > 0 && (
+                <svg
+                    className="search-highlight-layer"
+                    width={pageSize.width}
+                    height={pageSize.height}
+                    viewBox={`0 0 ${pageSize.width} ${pageSize.height}`}
+                >
+                    {searchHighlights.map((item, i) => {
+                        const x = item.bbox.x * scale;
+                        const y = item.bbox.y * scale;
+                        const w = Math.max(item.bbox.w * scale, 20);
+                        const h = Math.max(item.bbox.h * scale, 10);
+                        return (
+                            <rect
+                                key={i}
+                                x={x} y={y}
+                                width={Math.min(w, pageSize.width - x)}
+                                height={Math.min(h, pageSize.height - y)}
+                                rx={2} ry={2}
+                                fill={item.isCurrent ? 'rgba(37,99,235,0.45)' : 'rgba(99,179,237,0.25)'}
+                                stroke="none"
+                                strokeWidth={1.5}
+                            />
+                        );
+                    })}
+                </svg>
             )}
         </div>
     );

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { Virtuoso } from 'react-virtuoso';
 import type { VirtuosoHandle } from 'react-virtuoso';
 import { PageLayer } from './PageLayer';
+import type { SearchHighlightItem } from './PageLayer';
 import { PageGridItem } from './PageGridItem';
 import { usePdfLoader } from '../../hooks/usePdfLoader';
 import type { PDFLoadResult } from '../../hooks/usePdfLoader';
@@ -39,6 +40,17 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
     const [pdfResult, setPdfResult] = useState<PDFLoadResult | null>(null);
     const [pageStatuses, setPageStatuses] = useState<Record<number, PageOcrStatus>>({});
 
+    interface SearchRect {
+        page: number;
+        bbox: { x: number; y: number; w: number; h: number };
+        text: string;
+    }
+
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchResults, setSearchResults] = useState<SearchRect[]>([]);
+    const [searchIdx, setSearchIdx] = useState(-1);
+    const [isSearching, setIsSearching] = useState(false);
+
     const virtuosoRef = useRef<VirtuosoHandle>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const scrollerRef = useRef<HTMLElement | Window | null>(null);
@@ -59,6 +71,10 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
             setPageStatuses(currentDocument.pageOcrStatus);
         }
     }, [currentDocument]);
+
+    useEffect(() => {
+        setSearchQuery(''); setSearchResults([]); setSearchIdx(-1);
+    }, [activeDocId]);
 
     useEffect(() => {
         if (!activeDocId) {
@@ -103,11 +119,6 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
     }, [pdfUrl, pdfFile, loadFromUrl, loadFromFile, cleanup]);
 
     const handlePageClick = useCallback((_event: React.MouseEvent, pageNumber: number) => {
-        const status = pageStatuses[pageNumber];
-        if (status === 'recognized' || status === 'processing') {
-            return;
-        }
-
         const next = new Set(selectedPages);
         if (next.has(pageNumber)) {
             next.delete(pageNumber);
@@ -115,12 +126,22 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
             next.add(pageNumber);
         }
         setSelectedPages(Array.from(next));
-    }, [pageStatuses, selectedPages, setSelectedPages]);
+    }, [selectedPages, setSelectedPages]);
+
+    const selectedPagesForOcr = useMemo(
+        () => selectedPages
+            .filter((pageNumber) => {
+                const status = pageStatuses[pageNumber];
+                return status !== 'recognized' && status !== 'processing';
+            })
+            .sort((a, b) => a - b),
+        [pageStatuses, selectedPages]
+    );
 
     const handleRecognize = useCallback(async () => {
-        if (!currentDocument || selectedPages.length === 0) return;
+        if (!currentDocument || selectedPagesForOcr.length === 0) return;
 
-        const pagesToRecognize = [...selectedPages].sort((a, b) => a - b);
+        const pagesToRecognize = [...selectedPagesForOcr];
         const response = await recognizePages(currentDocument.id, pagesToRecognize);
         if (!response) {
             return;
@@ -128,11 +149,9 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
 
         const queued = Array.isArray(response.pages) ? response.pages : pagesToRecognize;
         if (queued.length === 0) {
-            setSelectedPages([]);
             return;
         }
 
-        setSelectedPages([]);
         const nextStatusMap = { ...pageStatuses };
         queued.forEach((pageNum: number) => {
             if (nextStatusMap[pageNum] !== 'recognized') {
@@ -154,9 +173,8 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
         onRecognizeQueued?.(currentDocument.id);
     }, [
         currentDocument,
-        selectedPages,
+        selectedPagesForOcr,
         recognizePages,
-        setSelectedPages,
         pageStatuses,
         updateDocumentOcrStatus,
         setTabProgress,
@@ -175,6 +193,16 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
         }
         return grouped;
     }, [highlights]);
+
+    const searchByPage = useMemo(() => {
+        const map = new Map<number, SearchHighlightItem[]>();
+        searchResults.forEach((r, i) => {
+            const arr = map.get(r.page) ?? [];
+            arr.push({ bbox: r.bbox, text: r.text, isCurrent: i === searchIdx });
+            map.set(r.page, arr);
+        });
+        return map;
+    }, [searchResults, searchIdx]);
 
     const scrollToHighlight = useCallback((
         pageNum: number,
@@ -216,6 +244,72 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
 
         window.requestAnimationFrame(() => attemptScroll(6));
     }, [scale]);
+
+    const goToSearchResult = useCallback((results: { page: number; bbox: { x: number; y: number; w: number; h: number }; text: string }[], idx: number) => {
+        if (idx < 0 || idx >= results.length) return;
+        const r = results[idx];
+        if (viewMode === 'grid') setViewMode('list');
+        scrollToHighlight(r.page, r.bbox, true);
+    }, [viewMode, setViewMode, scrollToHighlight]);
+
+    const handleSearch = useCallback(async () => {
+        if (!pdfResult || !searchQuery.trim()) {
+            setSearchResults([]); setSearchIdx(-1); return;
+        }
+        setIsSearching(true);
+        const results: { page: number; bbox: { x: number; y: number; w: number; h: number }; text: string }[] = [];
+        const q = searchQuery.toLowerCase();
+
+        for (let p = 1; p <= pdfResult.numPages; p++) {
+            const page = await pdfResult.getPage(p);
+            const viewport = page.getViewport({ scale: 1 });
+            const textContent = await page.getTextContent();
+
+            for (const item of textContent.items) {
+                if (!('str' in item) || !item.str.toLowerCase().includes(q)) continue;
+                const tx = (item as { str: string; transform: number[]; width: number; height: number }).transform;
+                const [vpX, vpBaseline] = viewport.convertToViewportPoint(tx[4], tx[5]);
+                const h = Math.abs((item as { height: number }).height) || 12;
+                const w = Math.abs((item as { width: number }).width) || 50;
+                results.push({ page: p, bbox: { x: vpX, y: vpBaseline - h, w, h }, text: (item as { str: string }).str });
+            }
+            if (results.length > 0) setSearchResults([...results]);
+        }
+
+        setIsSearching(false);
+        if (results.length > 0) {
+            setSearchIdx(0);
+            goToSearchResult(results, 0);
+        } else {
+            setSearchIdx(-1);
+        }
+    }, [pdfResult, searchQuery, goToSearchResult]);
+
+    const handleSearchNext = useCallback(() => {
+        if (!searchResults.length) return;
+        const next = (searchIdx + 1) % searchResults.length;
+        setSearchIdx(next);
+        goToSearchResult(searchResults, next);
+    }, [searchResults, searchIdx, goToSearchResult]);
+
+    const handleSearchPrev = useCallback(() => {
+        if (!searchResults.length) return;
+        const prev = (searchIdx - 1 + searchResults.length) % searchResults.length;
+        setSearchIdx(prev);
+        goToSearchResult(searchResults, prev);
+    }, [searchResults, searchIdx, goToSearchResult]);
+
+    const handleSearchKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            if (e.shiftKey) handleSearchPrev();
+            else if (searchResults.length > 0) handleSearchNext();
+            else handleSearch();
+        }
+        if (e.key === 'Escape') {
+            setSearchQuery(''); setSearchResults([]); setSearchIdx(-1);
+        }
+    }, [handleSearch, handleSearchNext, handleSearchPrev, searchResults.length]);
 
     useEffect(() => {
         if (highlights.length > 0 && pdfResult) {
@@ -341,9 +435,9 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
                     <button
                         className="ocr-run-btn"
                         onClick={handleRecognize}
-                        disabled={isRecognizing || selectedPages.length === 0}
+                        disabled={isRecognizing || selectedPagesForOcr.length === 0}
                     >
-                        {isRecognizing ? '识别中...' : '识别选中页面'}
+                        {isRecognizing ? '识别中...' : '识别选中未识别页'}
                     </button>
                     <span className="page-indicator">
                         共 {totalPages} 页
@@ -380,6 +474,41 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
                 <button onClick={() => handleZoom(1.25)} title="放大">
                     <span>+</span>
                 </button>
+
+                <div className="search-section">
+                    <div className="search-input-wrap">
+                        <svg className="search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                        </svg>
+                        <input
+                            type="text"
+                            className="search-input"
+                            placeholder="搜索文字..."
+                            value={searchQuery}
+                            onChange={e => {
+                                setSearchQuery(e.target.value);
+                                if (!e.target.value.trim()) { setSearchResults([]); setSearchIdx(-1); }
+                            }}
+                            onKeyDown={handleSearchKeyDown}
+                        />
+                    </div>
+                    {searchQuery.trim() && (
+                        <>
+                            <button className="search-btn" onClick={handleSearch} disabled={isSearching}>
+                                {isSearching ? '…' : '搜索'}
+                            </button>
+                            {searchResults.length > 0 && <>
+                                <button onClick={handleSearchPrev} className="search-nav-btn" title="上一个 (Shift+Enter)">↑</button>
+                                <button onClick={handleSearchNext} className="search-nav-btn" title="下一个 (Enter)">↓</button>
+                                <span className="search-count">{searchIdx + 1} / {searchResults.length}</span>
+                            </>}
+                            {!isSearching && searchResults.length === 0 && searchQuery.trim() && (
+                                <span className="search-no-result">无结果</span>
+                            )}
+                        </>
+                    )}
+                </div>
+
                 <span className="page-indicator">
                     第 {currentPage} / {pdfResult.numPages} 页
                 </span>
@@ -399,6 +528,7 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
                             scale={scale}
                             pdfResult={pdfResult}
                             highlights={highlightsByPage.get(index + 1) || EMPTY_HIGHLIGHTS}
+                            searchHighlights={searchByPage.get(index + 1)}
                         />
                     )}
                     rangeChanged={(range) => {
