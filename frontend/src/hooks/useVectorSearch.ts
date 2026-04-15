@@ -620,7 +620,7 @@ export function useVectorSearch() {
     const getComplianceHistory = useCallback(
         async (
             docId: string
-        ): Promise<{ requirementsText: string; results: ComplianceItem[]; markdown: string } | null> => {
+        ): Promise<{ requirementsText: string; results: ComplianceItem[]; markdown: string; allowedPagesText: string } | null> => {
             try {
                 const resp = await fetch(`${API_BASE}/documents/${docId}/compliance_history`);
                 if (resp.status === 404) return null;
@@ -630,6 +630,7 @@ export function useVectorSearch() {
                 const reqs: string[] = Array.isArray(data?.requirements) ? data.requirements : [];
                 const resultsRaw: any[] = Array.isArray(data?.results) ? data.results : [];
                 const markdown: string = typeof data?.markdown === 'string' ? data.markdown : '';
+                const allowedPagesRaw: number[] = Array.isArray(data?.allowed_pages) ? data.allowed_pages : [];
 
                 const mapped: ComplianceItem[] = resultsRaw.map((item: any, idx: number) => {
                     const refs = Array.isArray(item?.references) ? item.references : [];
@@ -661,8 +662,12 @@ export function useVectorSearch() {
                         references: mappedRefs,
                     } as ComplianceItem;
                 });
-
-                return { requirementsText: reqs.join('\n'), results: mapped, markdown };
+                return {
+                    requirementsText: reqs.join('\n'),
+                    results: mapped,
+                    markdown,
+                    allowedPagesText: allowedPagesRaw.length > 0 ? allowedPagesRaw.join(',') : '',
+                };
             } catch (e) {
                 console.error('获取合规检查历史错误:', e);
                 return null;

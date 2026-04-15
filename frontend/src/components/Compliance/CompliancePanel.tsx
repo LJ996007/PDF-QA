@@ -40,22 +40,57 @@ const toHighlightRef = (ref: CompatTextChunk, page: number): TextChunk => {
     };
 };
 
+const parseAllowedPages = (raw: string): number[] => {
+    const tokens = raw.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean);
+    const result = new Set<number>();
+    for (const token of tokens) {
+        const rangeMatch = token.match(/^(\d+)-(\d+)$/);
+        if (rangeMatch) {
+            const start = Number(rangeMatch[1]);
+            const end = Number(rangeMatch[2]);
+            if (Number.isInteger(start) && Number.isInteger(end) && start > 0 && end >= start) {
+                for (let page = start; page <= end; page += 1) {
+                    result.add(page);
+                }
+            }
+            continue;
+        }
+        const page = Number(token);
+        if (Number.isInteger(page) && page > 0) {
+            result.add(page);
+        }
+    }
+    return Array.from(result).sort((a, b) => a - b);
+};
+
+const formatSelectedPages = (pages: number[]): string => {
+    if (pages.length === 0) return '未选择';
+    if (pages.length <= 12) return pages.join(',');
+    return `${pages.slice(0, 12).join(',')} ... 共 ${pages.length} 页`;
+};
+
 export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) => {
     const {
         currentDocument,
         config,
+        selectedPages,
+        setSelectedPages,
         setHighlights,
         setCurrentPage,
         // 新增：合规性状态和操作
         complianceResults,
         complianceMarkdown,
         complianceRequirements,
+        complianceAllowedPagesText,
         setComplianceResults,
-        setComplianceRequirements
+        setComplianceRequirements,
+        setComplianceAllowedPagesText
     } = useDocumentStore();
 
     const currentDocumentId = currentDocument?.id;
     const apiBaseUrl = config.apiBaseUrl || 'http://localhost:8000';
+    const selectedPagesSummary = formatSelectedPages(selectedPages);
+    const selectedPagesTitle = selectedPages.length > 0 ? selectedPages.join(',') : '未选择';
 
     // 移除本地 state，改用 store state
     const [loading, setLoading] = useState(false);
@@ -68,6 +103,9 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
         setLoading(true);
         try {
             const reqList = complianceRequirements.split('\n').filter(r => r.trim());
+            const manualPages = parseAllowedPages(complianceAllowedPagesText);
+            const selectedGridPages = [...new Set(selectedPages)].sort((a, b) => a - b);
+            const mergedPages = Array.from(new Set([...selectedGridPages, ...manualPages])).sort((a, b) => a - b);
 
             const response = await fetch(`${apiBaseUrl}/api/documents/${currentDocumentId}/compliance`, {
                 method: 'POST',
@@ -76,7 +114,8 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
                 },
                 body: JSON.stringify({
                     requirements: reqList,
-                    api_key: config.deepseekApiKey || config.zhipuApiKey
+                    api_key: config.deepseekApiKey || config.zhipuApiKey,
+                    ...(mergedPages.length > 0 ? { allowed_pages: mergedPages } : {}),
                 }),
             });
 
@@ -181,6 +220,40 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
                         onChange={(e) => setComplianceRequirements(e.target.value)}
                         disabled={loading}
                     />
+                    <div className="page-scope-panel">
+                        <div className="page-scope-toolbar">
+                            <div className="page-scope-inline-group page-scope-inline-group--selected">
+                                <span className="page-scope-inline-label">已选页</span>
+                                <span className="page-scope-selected-value" title={selectedPagesTitle}>
+                                    {selectedPagesSummary}
+                                </span>
+                            </div>
+                            <div className="page-scope-inline-group page-scope-inline-group--manual">
+                                <label className="page-scope-inline-label" htmlFor="compliance-page-range">
+                                    人工页码
+                                </label>
+                                <input
+                                    id="compliance-page-range"
+                                    className="page-range-text-input"
+                                    placeholder="例如: 1-5,8,10"
+                                    value={complianceAllowedPagesText}
+                                    onChange={(e) => setComplianceAllowedPagesText(e.target.value)}
+                                    disabled={loading}
+                                />
+                            </div>
+                            <button
+                                type="button"
+                                className="page-scope-clear-btn"
+                                onClick={() => setSelectedPages([])}
+                                disabled={loading || selectedPages.length === 0}
+                            >
+                                清空已选页
+                            </button>
+                        </div>
+                        <div className="page-scope-hint">
+                            已选页和人工页码会自动合并；都为空时默认分析全部已识别页。
+                        </div>
+                    </div>
                     <button
                         className="check-btn"
                         onClick={handleCheck}

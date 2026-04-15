@@ -344,6 +344,7 @@ function App() {
             requirements: compliance.requirementsText,
             results: compliance.results,
             markdown: compliance.markdown,
+            allowedPagesText: compliance.allowedPagesText,
           });
         }
         if (auditHistory) {
@@ -426,6 +427,7 @@ function App() {
               requirements: compliance.requirementsText,
               results: compliance.results,
               markdown: compliance.markdown,
+              allowedPagesText: compliance.allowedPagesText,
             });
           }
           if (auditHistory) {
@@ -662,6 +664,7 @@ function App() {
           requirements: compliance.requirementsText,
           results: compliance.results,
           markdown: compliance.markdown,
+          allowedPagesText: compliance.allowedPagesText,
         });
       }
       if (auditHistory) {

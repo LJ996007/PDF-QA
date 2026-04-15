@@ -167,6 +167,7 @@ export interface TabState {
     complianceResults: ComplianceItem[];
     complianceMarkdown: string;
     complianceRequirements: string;
+    complianceAllowedPagesText: string;
     audit: MultimodalAuditState;
     rightPanelMode: RightPanelMode;
     progress: TabProgress | null;
@@ -416,6 +417,7 @@ const createTabState = (doc: Document, pdfUrl: string | null): TabState => ({
     complianceResults: [],
     complianceMarkdown: '',
     complianceRequirements: '',
+    complianceAllowedPagesText: '',
     audit: createDefaultAuditState(),
     rightPanelMode: 'chat',
     progress: null,
@@ -469,6 +471,7 @@ const normalizeTabState = (tab: unknown, docId: string): TabState | null => {
         complianceResults: Array.isArray(raw.complianceResults) ? raw.complianceResults : [],
         complianceMarkdown: String(raw.complianceMarkdown || ''),
         complianceRequirements: String(raw.complianceRequirements || ''),
+        complianceAllowedPagesText: String((raw as any).complianceAllowedPagesText || ''),
         audit: normalizeAuditState(raw.audit),
         rightPanelMode: raw.rightPanelMode === 'compliance'
             ? 'compliance'
@@ -502,6 +505,7 @@ interface DocumentState {
     complianceResults: ComplianceItem[];
     complianceMarkdown: string;
     complianceRequirements: string;
+    complianceAllowedPagesText: string;
     audit: MultimodalAuditState;
     rightPanelMode: RightPanelMode;
     activeProgress: TabProgress | null;
@@ -519,7 +523,7 @@ interface DocumentState {
     setTabProgress: (docId: string, progress: TabProgress | null) => void;
     setTabCompliance: (
         docId: string,
-        payload: { results?: ComplianceItem[]; markdown?: string; requirements?: string }
+        payload: { results?: ComplianceItem[]; markdown?: string; requirements?: string; allowedPagesText?: string }
     ) => void;
     setTabAudit: (
         docId: string,
@@ -534,6 +538,7 @@ interface DocumentState {
 
     setComplianceResults: (results: ComplianceItem[], markdown: string) => void;
     setComplianceRequirements: (text: string) => void;
+    setComplianceAllowedPagesText: (text: string) => void;
     setAuditState: (patch: Partial<MultimodalAuditState>) => void;
 
     setScale: (scale: number) => void;
@@ -630,6 +635,7 @@ const syncActiveFromTabs = (state: DocumentState): void => {
     state.complianceResults = tab?.complianceResults ?? [];
     state.complianceMarkdown = tab?.complianceMarkdown ?? '';
     state.complianceRequirements = tab?.complianceRequirements ?? '';
+    state.complianceAllowedPagesText = tab?.complianceAllowedPagesText ?? '';
     state.audit = tab?.audit ?? createDefaultAuditState();
     state.rightPanelMode = tab?.rightPanelMode ?? 'chat';
     state.activeProgress = tab?.progress ?? null;
@@ -665,10 +671,11 @@ export const useDocumentStore = create<DocumentState>()(
 
             config: initializeConfig(),
 
-            complianceResults: [],
-            complianceMarkdown: '',
-            complianceRequirements: '',
-            audit: createDefaultAuditState(),
+    complianceResults: [],
+    complianceMarkdown: '',
+    complianceRequirements: '',
+    complianceAllowedPagesText: '',
+    audit: createDefaultAuditState(),
             rightPanelMode: 'chat',
             activeProgress: null,
 
@@ -779,6 +786,9 @@ export const useDocumentStore = create<DocumentState>()(
                 if (typeof payload.requirements === 'string') {
                     tab.complianceRequirements = payload.requirements;
                 }
+                if (typeof payload.allowedPagesText === 'string') {
+                    tab.complianceAllowedPagesText = payload.allowedPagesText;
+                }
                 if (state.activeDocId === docId) {
                     syncActiveFromTabs(state);
                 }
@@ -863,6 +873,12 @@ export const useDocumentStore = create<DocumentState>()(
             setComplianceRequirements: (text) => set((state) => {
                 updateActiveTab(state, (tab) => {
                     tab.complianceRequirements = text;
+                });
+            }),
+
+            setComplianceAllowedPagesText: (text) => set((state) => {
+                updateActiveTab(state, (tab) => {
+                    tab.complianceAllowedPagesText = text;
                 });
             }),
 
@@ -1020,6 +1036,7 @@ export const useDocumentStore = create<DocumentState>()(
                     tabsByDocId[state.currentDocument.id].complianceResults = Array.isArray(state.complianceResults) ? state.complianceResults : [];
                     tabsByDocId[state.currentDocument.id].complianceMarkdown = String(state.complianceMarkdown || '');
                     tabsByDocId[state.currentDocument.id].complianceRequirements = String(state.complianceRequirements || '');
+                    tabsByDocId[state.currentDocument.id].complianceAllowedPagesText = String((state as any).complianceAllowedPagesText || '');
                     tabsByDocId[state.currentDocument.id].audit = createDefaultAuditState();
                     tabsByDocId[state.currentDocument.id].rightPanelMode = state.rightPanelMode === 'compliance'
                         ? 'compliance'

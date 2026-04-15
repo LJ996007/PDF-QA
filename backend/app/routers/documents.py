@@ -2315,6 +2315,7 @@ async def check_compliance(doc_id: str, request: ComplianceRequest):
             "doc_id": doc_id,
             "created_at": _now_iso_utc(),
             "requirements": list(request.requirements or []),
+            "allowed_pages": list(allowed_pages or []),
             **(results or {}),
         }
         document_store.save_compliance(doc_id, jsonable_encoder(payload))
