@@ -4,15 +4,46 @@ import {
     isMultimodalConfigured,
     resolveEffectiveMultimodalApiKey,
 } from '../../constants/multimodal';
+import type { ChatPageReferenceGroup } from '../../stores/documentStore';
 import { useDocumentStore } from '../../stores/documentStore';
 import { useVectorSearch } from '../../hooks/useVectorSearch';
+import {
+    formatPageSelectionLabel,
+    formatPageSelectionSummary,
+    normalizePageNumbers,
+    parsePageSelectionInput,
+} from '../../utils/pageSelection';
 import { MessageItem } from './MessageItem';
 import './ChatPanel.css';
 
-const formatPageList = (pages: number[]): string => {
-    const sorted = [...pages].sort((a, b) => a - b);
-    return sorted.join('、');
+const PAGE_GROUP_LABEL_PREFIX = '页面组';
+
+const getAliasFromIndex = (index: number): string => {
+    let value = index;
+    let alias = '';
+
+    do {
+        alias = String.fromCharCode(65 + (value % 26)) + alias;
+        value = Math.floor(value / 26) - 1;
+    } while (value >= 0);
+
+    return alias;
 };
+
+const getNextPageGroupAlias = (existingAliases: string[]): string => {
+    const aliasSet = new Set(existingAliases.map((alias) => alias.trim().toUpperCase()).filter(Boolean));
+
+    for (let index = 0; index < 512; index += 1) {
+        const alias = getAliasFromIndex(index);
+        if (!aliasSet.has(alias)) {
+            return alias;
+        }
+    }
+
+    return `Z${Date.now()}`;
+};
+
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 export const ChatPanel: React.FC = () => {
     const {
@@ -30,17 +61,98 @@ export const ChatPanel: React.FC = () => {
     const [inputValue, setInputValue] = useState('');
     const [pageFrom, setPageFrom] = useState('');
     const [pageTo, setPageTo] = useState('');
+    const [manualGroupPagesText, setManualGroupPagesText] = useState('');
+    const [pageReferenceGroups, setPageReferenceGroups] = useState<ChatPageReferenceGroup[]>([]);
     const [useVision, setUseVision] = useState(true);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
+    const pageReferenceGroupIdRef = useRef(0);
     const multimodalReady = isMultimodalConfigured(config);
     const effectiveMultimodalApiKey = resolveEffectiveMultimodalApiKey(config);
     const currentMultimodalLabel = getMultimodalDefaults(config.multimodalProvider).label;
 
-    // 自动滚动到底部
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
+
+    const insertTextAtCursor = (text: string) => {
+        const textarea = inputRef.current;
+        if (!textarea) {
+            setInputValue((prev) => prev + text);
+            return;
+        }
+
+        const start = textarea.selectionStart ?? inputValue.length;
+        const end = textarea.selectionEnd ?? inputValue.length;
+        const nextValue = `${inputValue.slice(0, start)}${text}${inputValue.slice(end)}`;
+        setInputValue(nextValue);
+
+        window.requestAnimationFrame(() => {
+            textarea.focus();
+            const caretPosition = start + text.length;
+            textarea.setSelectionRange(caretPosition, caretPosition);
+        });
+    };
+
+    const createPageReferenceGroup = (pages: number[]) => {
+        const normalizedPages = normalizePageNumbers(pages);
+        if (normalizedPages.length === 0) {
+            window.alert('请选择有效页码后再创建页面组。');
+            return;
+        }
+
+        const alias = getNextPageGroupAlias(pageReferenceGroups.map((group) => group.alias));
+        const label = `${PAGE_GROUP_LABEL_PREFIX}${alias}`;
+        const placeholder = `【${label}】`;
+        pageReferenceGroupIdRef.current += 1;
+        const nextGroup: ChatPageReferenceGroup = {
+            id: `page_group_${pageReferenceGroupIdRef.current}_${alias}`,
+            alias,
+            label,
+            placeholder,
+            pages: normalizedPages,
+        };
+
+        setPageReferenceGroups((prev) => [...prev, nextGroup]);
+        insertTextAtCursor(placeholder);
+    };
+
+    const handleCreateGroupFromSelectedPages = () => {
+        if (selectedPages.length === 0) {
+            window.alert('请先在左侧网格视图选择页面。');
+            return;
+        }
+
+        createPageReferenceGroup(selectedPages);
+    };
+
+    const handleCreateGroupFromManualPages = () => {
+        if (!currentDocument) return;
+
+        const manualPages = parsePageSelectionInput(manualGroupPagesText, currentDocument.totalPages);
+        if (manualPages.length === 0) {
+            window.alert('请输入有效页码，例如 1,3-5,8。');
+            return;
+        }
+
+        createPageReferenceGroup(manualPages);
+        setManualGroupPagesText('');
+    };
+
+    const handleInsertPageReferenceGroup = (group: ChatPageReferenceGroup) => {
+        insertTextAtCursor(group.placeholder);
+    };
+
+    const handleDeletePageReferenceGroup = (groupId: string) => {
+        const targetGroup = pageReferenceGroups.find((group) => group.id === groupId);
+        if (!targetGroup) {
+            return;
+        }
+
+        const placeholderPattern = new RegExp(escapeRegExp(targetGroup.placeholder), 'g');
+        setPageReferenceGroups((prev) => prev.filter((group) => group.id !== groupId));
+        setInputValue((prev) => prev.replace(placeholderPattern, ''));
+    };
 
     const handleSend = async () => {
         const question = inputValue.trim();
@@ -48,11 +160,13 @@ export const ChatPanel: React.FC = () => {
 
         setInputValue('');
 
+        const hasPageReferenceGroups = pageReferenceGroups.length > 0;
         const totalPages = currentDocument.totalPages;
         let allowedPages: number[] | undefined;
-        if (selectedPages.length > 0) {
+
+        if (!hasPageReferenceGroups && selectedPages.length > 0) {
             allowedPages = [...selectedPages].sort((a, b) => a - b);
-        } else {
+        } else if (!hasPageReferenceGroups) {
             const from = parseInt(pageFrom, 10);
             const to = parseInt(pageTo, 10);
             if (!isNaN(from) || !isNaN(to)) {
@@ -65,7 +179,13 @@ export const ChatPanel: React.FC = () => {
         }
 
         try {
-            await askQuestion(question, { allowedPages, useVision: useVision && multimodalReady });
+            await askQuestion(question, {
+                allowedPages,
+                useVision: useVision && multimodalReady,
+                pageReferenceGroups,
+            });
+            setPageReferenceGroups([]);
+            setManualGroupPagesText('');
         } catch (error) {
             console.error('问答错误:', error);
         }
@@ -83,12 +203,19 @@ export const ChatPanel: React.FC = () => {
         '总结第一页的要点',
         '文档中有哪些关键数据？',
     ];
-    const selectedPagesText = selectedPages.length > 0 ? formatPageList(selectedPages) : '';
-    const pageScopeText = selectedPages.length > 0
-        ? `当前问答范围：已选页面 ${selectedPagesText}`
-        : (pageFrom || pageTo)
-            ? `当前问答范围：第 ${pageFrom || '1'} ~ ${pageTo || currentDocument?.totalPages || ''} 页`
-            : '当前问答范围：全文，可在左侧网格视图勾选页面';
+    const selectedPagesText = selectedPages.length > 0
+        ? formatPageSelectionSummary(selectedPages, { separator: '、' })
+        : '';
+    const manualGroupPagesPreview = currentDocument
+        ? parsePageSelectionInput(manualGroupPagesText, currentDocument.totalPages)
+        : [];
+    const pageScopeText = pageReferenceGroups.length > 0
+        ? `当前问答模式：${pageReferenceGroups.map((group) => group.placeholder).join('、')}。发送时会按这些页面组的并集检索，并忽略单一页码范围。`
+        : selectedPages.length > 0
+            ? `当前问答范围：已选页面 ${selectedPagesText}`
+            : (pageFrom || pageTo)
+                ? `当前问答范围：第 ${pageFrom || '1'} ~ ${pageTo || currentDocument?.totalPages || ''} 页`
+                : '当前问答范围：全文，可在左侧网格视图勾选页面，或先创建页面组。';
 
     return (
         <div className="chat-panel">
@@ -137,54 +264,6 @@ export const ChatPanel: React.FC = () => {
                     >
                         清空上下文
                     </button>
-                    {currentDocument && selectedPages.length > 0 && (
-                        <div className="selected-pages-selector" title="问答会优先按这些页面检索和回答">
-                            <span className="selected-pages-label">已选页面：</span>
-                            <span className="selected-pages-value">{selectedPagesText}</span>
-                            <button
-                                className="selected-pages-clear"
-                                onClick={() => setSelectedPages([])}
-                                disabled={isLoading}
-                                title="清除页面选择"
-                            >
-                                清除
-                            </button>
-                        </div>
-                    )}
-                    {currentDocument && (
-                        <div className="page-range-selector">
-                            <span className="page-range-label">手动页码：</span>
-                            <input
-                                type="number"
-                                className="page-range-input"
-                                value={pageFrom}
-                                onChange={(e) => setPageFrom(e.target.value)}
-                                placeholder="起始"
-                                min={1}
-                                max={currentDocument.totalPages}
-                                disabled={isLoading || selectedPages.length > 0}
-                            />
-                            <span className="page-range-sep">~</span>
-                            <input
-                                type="number"
-                                className="page-range-input"
-                                value={pageTo}
-                                onChange={(e) => setPageTo(e.target.value)}
-                                placeholder="结束"
-                                min={1}
-                                max={currentDocument.totalPages}
-                                disabled={isLoading || selectedPages.length > 0}
-                            />
-                            {(pageFrom || pageTo) && (
-                                <button
-                                    className="page-range-clear"
-                                    onClick={() => { setPageFrom(''); setPageTo(''); }}
-                                    disabled={isLoading || selectedPages.length > 0}
-                                    title="清除范围限制"
-                                >×</button>
-                            )}
-                        </div>
-                    )}
                     {currentDocument && (
                         <label
                             className={`vision-toggle ${!multimodalReady ? 'disabled' : ''}`}
@@ -202,12 +281,143 @@ export const ChatPanel: React.FC = () => {
                         </label>
                     )}
                 </div>
+                {currentDocument && (
+                    <div className="page-reference-panel">
+                        <div className="page-reference-header">
+                            <div className="page-reference-title-wrap">
+                                <span className="page-reference-title">引用页面</span>
+                                <span className="page-reference-hint">把页码保存为页面组，再插入到问题里</span>
+                            </div>
+                        </div>
+
+                        <div className="page-reference-source-row">
+                            <div className="page-reference-source-card">
+                                <span className="page-reference-source-label">当前已选页</span>
+                                <span className="page-reference-source-value">
+                                    {selectedPages.length > 0 ? formatPageSelectionLabel(selectedPages) : '未选择'}
+                                </span>
+                            </div>
+                            <button
+                                type="button"
+                                className="page-reference-action-btn"
+                                onClick={handleCreateGroupFromSelectedPages}
+                                disabled={isLoading || selectedPages.length === 0}
+                            >
+                                保存为页面组
+                            </button>
+                            <button
+                                type="button"
+                                className="page-reference-secondary-btn"
+                                onClick={() => setSelectedPages([])}
+                                disabled={isLoading || selectedPages.length === 0}
+                            >
+                                清空已选页
+                            </button>
+                        </div>
+
+                        <div className="page-reference-source-row">
+                            <input
+                                type="text"
+                                className="page-reference-manual-input"
+                                value={manualGroupPagesText}
+                                onChange={(e) => setManualGroupPagesText(e.target.value)}
+                                placeholder="手工页码，例如 1,3-5,8"
+                                disabled={isLoading}
+                            />
+                            <button
+                                type="button"
+                                className="page-reference-action-btn"
+                                onClick={handleCreateGroupFromManualPages}
+                                disabled={isLoading || !manualGroupPagesText.trim()}
+                            >
+                                从手工页码建组
+                            </button>
+                        </div>
+
+                        {manualGroupPagesText.trim() && (
+                            <div className="page-reference-manual-preview">
+                                {manualGroupPagesPreview.length > 0
+                                    ? `将创建：${formatPageSelectionLabel(manualGroupPagesPreview)}`
+                                    : '未识别到有效页码'}
+                            </div>
+                        )}
+
+                        {pageReferenceGroups.length > 0 && (
+                            <div className="page-reference-group-list">
+                                {pageReferenceGroups.map((group) => (
+                                    <div key={group.id} className="page-reference-group-chip">
+                                        <div className="page-reference-group-main">
+                                            <span className="page-reference-group-placeholder">{group.placeholder}</span>
+                                            <span className="page-reference-group-pages">
+                                                {formatPageSelectionLabel(group.pages)}
+                                            </span>
+                                        </div>
+                                        <div className="page-reference-group-actions">
+                                            <button
+                                                type="button"
+                                                className="page-reference-chip-btn"
+                                                onClick={() => handleInsertPageReferenceGroup(group)}
+                                                disabled={isLoading}
+                                            >
+                                                再次插入
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="page-reference-chip-btn page-reference-chip-btn--danger"
+                                                onClick={() => handleDeletePageReferenceGroup(group.id)}
+                                                disabled={isLoading}
+                                            >
+                                                删除
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
                 {currentDocument && !multimodalReady && (
                     <div className="vision-config-hint">
                         请先在设置中配置多模态模型。当前供应商为 {currentMultimodalLabel}，
                         {config.multimodalBaseUrl && config.multimodalModel
                             ? (effectiveMultimodalApiKey ? '参数已完整。' : '还缺少可用的 API Key。')
                             : '还缺少 Base URL 或模型名。'}
+                    </div>
+                )}
+                {currentDocument && (
+                    <div className="page-range-selector">
+                        <span className="page-range-label">单一页码范围：</span>
+                        <input
+                            type="number"
+                            className="page-range-input"
+                            value={pageFrom}
+                            onChange={(e) => setPageFrom(e.target.value)}
+                            placeholder="起始"
+                            min={1}
+                            max={currentDocument.totalPages}
+                            disabled={isLoading || pageReferenceGroups.length > 0}
+                        />
+                        <span className="page-range-sep">~</span>
+                        <input
+                            type="number"
+                            className="page-range-input"
+                            value={pageTo}
+                            onChange={(e) => setPageTo(e.target.value)}
+                            placeholder="结束"
+                            min={1}
+                            max={currentDocument.totalPages}
+                            disabled={isLoading || pageReferenceGroups.length > 0}
+                        />
+                        {(pageFrom || pageTo) && (
+                            <button
+                                className="page-range-clear"
+                                onClick={() => { setPageFrom(''); setPageTo(''); }}
+                                disabled={isLoading || pageReferenceGroups.length > 0}
+                                title="清除范围限制"
+                            >
+                                ×
+                            </button>
+                        )}
                     </div>
                 )}
                 {currentDocument && (
@@ -237,4 +447,3 @@ export const ChatPanel: React.FC = () => {
         </div>
     );
 };
-

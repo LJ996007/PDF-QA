@@ -1108,7 +1108,7 @@ function App() {
 
           <div className="right-panel-content">
             {rightPanelMode === 'chat'
-              ? <ChatPanel />
+              ? <ChatPanel key={activeDocId || 'chat-panel'} />
               : rightPanelMode === 'compliance'
                 ? <CompliancePanel />
                 : <MultimodalAuditPanel />}

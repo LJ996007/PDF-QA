@@ -122,11 +122,20 @@ export interface Document {
     textFallbackUsed?: boolean;
 }
 
+export interface ChatPageReferenceGroup {
+    id: string;
+    alias: string;
+    label: string;
+    placeholder: string;
+    pages: number[];
+}
+
 export interface ChatMessage {
     id: string;
     role: 'user' | 'assistant';
     content: string;
     references: TextChunk[];
+    pageReferenceGroups?: ChatPageReferenceGroup[];
     activeRefs: string[];
     timestamp: Date;
     isStreaming?: boolean;
@@ -223,12 +232,39 @@ const normalizeMessages = (messages: unknown): ChatMessage[] => {
                 role: raw.role,
                 content: String(raw.content || ''),
                 references: Array.isArray(raw.references) ? raw.references : [],
+                pageReferenceGroups: normalizePageReferenceGroups((raw as { pageReferenceGroups?: unknown }).pageReferenceGroups),
                 activeRefs: Array.isArray(raw.activeRefs) ? raw.activeRefs : [],
                 timestamp: toDate(raw.timestamp),
                 isStreaming: Boolean(raw.isStreaming),
             } as ChatMessage;
         })
         .filter((m): m is ChatMessage => Boolean(m));
+};
+
+const normalizePageReferenceGroups = (groups: unknown): ChatPageReferenceGroup[] => {
+    if (!Array.isArray(groups)) return [];
+    return groups
+        .map((group, index) => {
+            if (!group || typeof group !== 'object') return null;
+            const raw = group as Partial<ChatPageReferenceGroup>;
+            const alias = String(raw.alias || '').trim();
+            const label = String(raw.label || '').trim();
+            const placeholder = String(raw.placeholder || '').trim();
+            const pages = normalizeSelectedPages(raw.pages);
+
+            if (!alias || !label || !placeholder || pages.length === 0) {
+                return null;
+            }
+
+            return {
+                id: String(raw.id || `page_group_${index + 1}`),
+                alias,
+                label,
+                placeholder,
+                pages,
+            } as ChatPageReferenceGroup;
+        })
+        .filter((group): group is ChatPageReferenceGroup => Boolean(group));
 };
 
 const normalizeSelectedPages = (pages: unknown): number[] => {

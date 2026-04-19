@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useDocumentStore } from '../../stores/documentStore';
 import type { BoundingBox, TextChunk } from '../../stores/documentStore';
+import { formatPageSelectionSummary, parsePageSelectionInput } from '../../utils/pageSelection';
 import './CompliancePanel.css';
 
 interface CompliancePanelProps {
@@ -40,33 +41,8 @@ const toHighlightRef = (ref: CompatTextChunk, page: number): TextChunk => {
     };
 };
 
-const parseAllowedPages = (raw: string): number[] => {
-    const tokens = raw.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean);
-    const result = new Set<number>();
-    for (const token of tokens) {
-        const rangeMatch = token.match(/^(\d+)-(\d+)$/);
-        if (rangeMatch) {
-            const start = Number(rangeMatch[1]);
-            const end = Number(rangeMatch[2]);
-            if (Number.isInteger(start) && Number.isInteger(end) && start > 0 && end >= start) {
-                for (let page = start; page <= end; page += 1) {
-                    result.add(page);
-                }
-            }
-            continue;
-        }
-        const page = Number(token);
-        if (Number.isInteger(page) && page > 0) {
-            result.add(page);
-        }
-    }
-    return Array.from(result).sort((a, b) => a - b);
-};
-
 const formatSelectedPages = (pages: number[]): string => {
-    if (pages.length === 0) return '未选择';
-    if (pages.length <= 12) return pages.join(',');
-    return `${pages.slice(0, 12).join(',')} ... 共 ${pages.length} 页`;
+    return formatPageSelectionSummary(pages, { emptyText: '未选择', separator: ',' });
 };
 
 export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) => {
@@ -103,7 +79,7 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
         setLoading(true);
         try {
             const reqList = complianceRequirements.split('\n').filter(r => r.trim());
-            const manualPages = parseAllowedPages(complianceAllowedPagesText);
+            const manualPages = parsePageSelectionInput(complianceAllowedPagesText);
             const selectedGridPages = [...new Set(selectedPages)].sort((a, b) => a - b);
             const mergedPages = Array.from(new Set([...selectedGridPages, ...manualPages])).sort((a, b) => a - b);
 

@@ -1,0 +1,174 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - heading "PDF 智能问答系统" [level=1] [ref=e6]
+      - generic [ref=e7]: V6.0
+    - generic [ref=e8]:
+      - button "新增文件" [ref=e9] [cursor=pointer]
+      - button "关闭当前标签" [ref=e49] [cursor=pointer]
+      - button "设置" [ref=e10] [cursor=pointer]
+  - main [ref=e11]:
+    - generic [ref=e12]:
+      - generic [ref=e50]:
+        - button "供应商彩页-简版.pdf 已完成 OCR x" [ref=e222] [cursor=pointer]:
+          - generic [ref=e53]:
+            - generic "供应商彩页-简版.pdf" [ref=e54]
+            - generic [ref=e55]: 已完成
+          - generic [ref=e56]:
+            - button "OCR" [disabled] [ref=e57]
+            - button "x" [ref=e58]
+        - button "+" [ref=e60] [cursor=pointer]
+      - generic [ref=e61]:
+        - generic [ref=e62]:
+          - group "页面浏览模式" [ref=e63]:
+            - button "单页浏览" [pressed] [ref=e64] [cursor=pointer]:
+              - img [ref=e65]
+            - button "网格浏览" [ref=e68] [cursor=pointer]:
+              - img [ref=e69]
+          - button "-" [ref=e268] [cursor=pointer]:
+            - generic [ref=e269]: "-"
+          - generic [ref=e270]: 100%
+          - button "+" [ref=e271] [cursor=pointer]:
+            - generic [ref=e272]: +
+          - generic [ref=e274]:
+            - img [ref=e275]
+            - textbox "搜索文字..." [ref=e278]
+          - generic [ref=e279]: 第 1 / 3 页
+        - generic [ref=e284]:
+          - img:
+            - generic:
+              - generic "新制造模式发展对内部缺陷与特征无损检测与表征需要。..."
+              - generic:
+                - generic: "8"
+    - generic [ref=e23]:
+      - generic [ref=e24]:
+        - button "智能问答" [ref=e25] [cursor=pointer]
+        - button "合规检查" [ref=e26] [cursor=pointer]
+        - button "专项审查" [ref=e27] [cursor=pointer]
+      - generic [ref=e94]:
+        - generic [ref=e95]:
+          - heading "📄 智能问答" [level=3] [ref=e96]
+          - generic [ref=e97]: 供应商彩页-简版.pdf
+        - generic [ref=e98]:
+          - generic [ref=e101]: 识别这个文件内容，主要说了什么
+          - generic [ref=e103]:
+            - generic [ref=e104]:
+              - paragraph [ref=e105]: 该文档主要介绍了型号为L9181-02的微焦点X射线源的技术参数，并论证其满足相关招标技术要求。具体内容如下：
+              - list [ref=e106]:
+                - listitem [ref=e107]:
+                  - paragraph [ref=e108]:
+                    - strong [ref=e109]: 主要技术参数
+                    - text: ：
+                  - list [ref=e110]:
+                    - listitem [ref=e111]:
+                      - text: 管电压设置范围为0-130KV，管电流设置范围为0-300 μA
+                      - button "1" [ref=e112] [cursor=pointer]
+                      - text: 。
+                    - listitem [ref=e113]:
+                      - text: 最大输出功率分为三种模式：小焦点模式为8W，中焦点模式为16W，大焦点模式为39W
+                      - button "1" [ref=e114] [cursor=pointer]
+                      - text: 。
+                    - listitem [ref=e115]:
+                      - text: 该射线源提供三种焦点尺寸选择：小焦点8 μm，中焦点20 μm，大焦点40 μm
+                      - button "1" [ref=e116] [cursor=pointer]
+                      - text: 。
+                - listitem [ref=e117]:
+                  - paragraph [ref=e118]:
+                    - strong [ref=e119]: 招标要求符合性说明
+                    - text: ：
+                  - list [ref=e120]:
+                    - listitem [ref=e121]:
+                      - text: 设备能量达到≥130KV，满足招标对能量的要求
+                      - button "1" [ref=e122] [cursor=pointer]
+                      - text: 。
+                    - listitem [ref=e123]:
+                      - text: 设备最小焦点为8 μm，满足招标对焦点≤8 μm的要求
+                      - button "1" [ref=e124] [cursor=pointer]
+                      - text: 。
+                    - listitem [ref=e125]:
+                      - text: 设备随附完整SDK，支持第三方软件控制射线源开关、管电压与管电流的调整和设置，满足提供二次开发软件接口的要求
+                      - button "1" [ref=e126] [cursor=pointer]
+                      - text: 。
+                - listitem [ref=e127]:
+                  - paragraph [ref=e128]:
+                    - strong [ref=e129]: 结论
+                    - text: ：
+                  - list [ref=e130]:
+                    - listitem [ref=e131]:
+                      - text: 文档最后总结，本系统LV-PCT-130选用的微焦点X射线源L9181-02满足招标技术要求
+                      - button "1" [ref=e132] [cursor=pointer]
+                      - text: 。
+            - generic [ref=e134] [cursor=pointer]:
+              - generic [ref=e135]: ▶
+              - generic [ref=e136]: 📚 引用来源 (1)
+          - generic [ref=e209]:
+            - generic [ref=e210]:
+              - text: 帮我分析
+              - generic "第1页" [ref=e211]: 【页面组A】
+              - text: 与
+              - generic "第2-3页" [ref=e212]: 【页面组B】
+              - text: 是否表述一致
+            - generic [ref=e213]:
+              - generic "1" [ref=e214]: 【页面组A】 = 第1页
+              - generic "2,3" [ref=e215]: 【页面组B】 = 第2-3页
+          - paragraph [ref=e219]: 根据现有片段无法确认。未从该文档索引中检索到可用内容。 该文件可能是扫描件，仍有 3 页需要 OCR。 请先配置 OCR 服务并重新识别。
+          - generic [ref=e241]:
+            - generic [ref=e242]:
+              - text: 帮我分析
+              - generic "第1页" [ref=e243]: 【页面组A】
+              - text: 与
+              - generic "第2-3页" [ref=e244]: 【页面组B】
+              - text: 是否表述一致，并列出主要差异
+            - generic [ref=e245]:
+              - generic "1" [ref=e246]: 【页面组A】 = 第1页
+              - generic "2,3" [ref=e247]: 【页面组B】 = 第2-3页
+          - generic [ref=e249]:
+            - generic [ref=e252]:
+              - paragraph [ref=e253]: 根据现有文档片段，无法直接判断【页面组A】与【页面组B】的表述是否一致，因为片段内容没有提供足够用于比较的、关于同一主题的具体信息。
+              - paragraph [ref=e254]: 主要差异（基于片段中提及的不同主题）：
+              - list [ref=e255]:
+                - listitem [ref=e256]:
+                  - text: 【页面组A】（第1页）的内容涉及“新制造模式发展对内部缺陷与特征无损检测与表征需要”
+                  - button "8" [active] [ref=e257] [cursor=pointer]
+                  - text: 和“技术设计方案”
+                  - button "9" [ref=e258] [cursor=pointer]
+                  - text: 。
+                - listitem [ref=e259]:
+                  - text: 【页面组B】（第2-3页）的内容则涉及“高精度机电扫描控制装置”
+                  - button "6" [ref=e260] [cursor=pointer]
+                  - text: 、“3分系统方案”
+                  - button "7" [ref=e261] [cursor=pointer]
+                  - text: 以及“微焦点X射线源L9181-02”的具体技术参数、操作建议和焦点尺寸等信息 [ref-1, ref-2, ref-3, ref-4, ref-5, ref-10]。
+              - paragraph [ref=e262]: 由于两组页面讨论的主题和具体内容在现有片段中没有重叠，因此无法进行一致性比较。
+            - generic [ref=e264] [cursor=pointer]:
+              - generic [ref=e265]: ▶
+              - generic [ref=e266]: 📚 引用来源 (10)
+        - generic [ref=e137]:
+          - generic [ref=e138]:
+            - button "清空上下文" [ref=e139] [cursor=pointer]
+            - generic "请先在设置中配置多模态模型" [ref=e140] [cursor=pointer]:
+              - checkbox "🖼 多模态回答" [checked] [disabled] [ref=e141]
+              - generic [ref=e142]: 🖼 多模态回答
+          - generic [ref=e143]:
+            - generic [ref=e145]:
+              - generic [ref=e146]: 引用页面
+              - generic [ref=e147]: 把页码保存为页面组，再插入到问题里
+            - generic [ref=e148]:
+              - generic [ref=e149]:
+                - generic [ref=e150]: 当前已选页
+                - generic [ref=e151]: 第1页
+              - button "保存为页面组" [ref=e152] [cursor=pointer]
+              - button "清空已选页" [ref=e153] [cursor=pointer]
+            - generic [ref=e154]:
+              - textbox "手工页码，例如 1,3-5,8" [ref=e155]
+              - button "从手工页码建组" [disabled] [ref=e156]
+          - generic [ref=e157]: 请先在设置中配置多模态模型。当前供应商为 智谱，还缺少可用的 API Key。
+          - generic [ref=e158]:
+            - generic [ref=e159]: 单一页码范围：
+            - spinbutton [ref=e160]
+            - generic [ref=e161]: ~
+            - spinbutton [ref=e162]
+          - generic [ref=e163]: 当前问答范围：已选页面 1
+          - generic [ref=e164]:
+            - textbox "输入问题，按 Enter 发送..." [ref=e165]
+            - button "发送" [disabled] [ref=e267]

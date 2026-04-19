@@ -1,6 +1,7 @@
 import React from 'react';
 import type { ChatMessage } from '../../stores/documentStore';
 import { useDocumentStore } from '../../stores/documentStore';
+import { formatPageSelectionLabel } from '../../utils/pageSelection';
 import { ChatMarkdownContent } from './ChatMarkdownContent';
 
 interface MessageItemProps {
@@ -81,6 +82,29 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
         }
     }, [handleMissingRef, jumpToReference]);
 
+    const renderUserContentWithPageGroups = React.useCallback((content: string) => {
+        const groups = message.pageReferenceGroups || [];
+        if (groups.length === 0) {
+            return content;
+        }
+
+        const placeholderMap = new Map(groups.map((group) => [group.placeholder, group]));
+        const pattern = new RegExp(`(${groups.map((group) => group.placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'g');
+
+        return content.split(pattern).map((part, index) => {
+            const group = placeholderMap.get(part);
+            if (!group) {
+                return <span key={index}>{part}</span>;
+            }
+
+            return (
+                <span key={group.id + index} className="message-page-group-token" title={formatPageSelectionLabel(group.pages)}>
+                    {group.placeholder}
+                </span>
+            );
+        });
+    }, [message.pageReferenceGroups]);
+
     // 渲染带引用标记的内容
     const renderPlainContentWithRefs = (content: string) => {
         // 匹配 [ref-N] 格式
@@ -131,7 +155,23 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
                         </MarkdownErrorBoundary>
                     )
                 ) : (
-                    <div className="message-content plain-content">{message.content}</div>
+                    <div className="message-content plain-content">
+                        {renderUserContentWithPageGroups(message.content)}
+                    </div>
+                )}
+
+                {message.role === 'user' && (message.pageReferenceGroups || []).length > 0 && (
+                    <div className="message-page-group-list">
+                        {(message.pageReferenceGroups || []).map((group) => (
+                            <span
+                                key={group.id}
+                                className="message-page-group-pill"
+                                title={group.pages.join(',')}
+                            >
+                                {group.placeholder} = {formatPageSelectionLabel(group.pages)}
+                            </span>
+                        ))}
+                    </div>
                 )}
 
                 {/* 引用列表 */}

@@ -94,6 +94,22 @@ class OCRResponse(BaseModel):
     message: Optional[str] = None
 
 
+class ChatPageReferenceGroup(BaseModel):
+    """Named page group injected from the chat composer."""
+
+    id: str
+    alias: str
+    label: str
+    placeholder: str
+    pages: List[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def normalize_pages(self):
+        deduped_pages = sorted({int(page) for page in self.pages if int(page) > 0})
+        self.pages = deduped_pages
+        return self
+
+
 class ChatRequest(BaseModel):
     """Chat request."""
 
@@ -103,6 +119,7 @@ class ChatRequest(BaseModel):
     zhipu_api_key: Optional[str] = None
     deepseek_api_key: Optional[str] = None
     allowed_pages: List[int] = Field(default_factory=list)
+    page_reference_groups: List[ChatPageReferenceGroup] = Field(default_factory=list)
     use_vision: bool = False
     multimodal_provider: Optional[str] = None
     multimodal_api_key: Optional[str] = None
@@ -140,6 +157,7 @@ class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
     references: List[ChatReference] = Field(default_factory=list)
+    page_reference_groups: List[ChatPageReferenceGroup] = Field(default_factory=list)
     timestamp: datetime
 
 

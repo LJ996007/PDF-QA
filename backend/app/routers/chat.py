@@ -98,6 +98,22 @@ def _build_page_level_references(page_inputs: list[PageImageInput]) -> list[dict
     return refs
 
 
+def _collect_effective_allowed_pages(request: ChatRequest) -> list[int]:
+    if request.page_reference_groups:
+        grouped_pages = sorted(
+            {
+                int(page)
+                for group in request.page_reference_groups
+                for page in group.pages
+                if int(page) > 0
+            }
+        )
+        if grouped_pages:
+            return grouped_pages
+
+    return sorted({int(page) for page in request.allowed_pages if int(page) > 0})
+
+
 @router.post("/chat")
 async def chat(request: ChatRequest):
     """流式返回带引用的 RAG 答案。"""
@@ -106,12 +122,13 @@ async def chat(request: ChatRequest):
     if not ensure_document_loaded(doc_id):
         raise HTTPException(status_code=404, detail="文档不存在")
 
+    effective_allowed_pages = _collect_effective_allowed_pages(request)
     chunks = await rag_engine.retrieve(
         query=request.question,
         doc_id=doc_id,
         top_k=10,
         api_key=request.zhipu_api_key,
-        allowed_pages=request.allowed_pages if request.allowed_pages else None,
+        allowed_pages=effective_allowed_pages if effective_allowed_pages else None,
     )
 
     refs_data = [_serialize_chunk_reference(chunk, index + 1) for index, chunk in enumerate(chunks)]
@@ -131,8 +148,8 @@ async def chat(request: ChatRequest):
         if request.use_vision:
             doc = documents.get(doc_id) or {}
             total_pages = int(doc.get("total_pages") or 0)
-            if request.allowed_pages:
-                pages_to_view = sorted(set(request.allowed_pages))
+            if effective_allowed_pages:
+                pages_to_view = effective_allowed_pages
             elif chunks:
                 pages_to_view = sorted({c.page_number for c in chunks}) or [1]
             elif total_pages > 0:
@@ -169,6 +186,7 @@ async def chat(request: ChatRequest):
                 question=request.question,
                 references=visual_refs,
                 chunks=relevant_chunks or None,
+                page_reference_groups=request.page_reference_groups,
             )
             try:
                 provider = get_multimodal_provider(request.multimodal_provider)
@@ -198,6 +216,7 @@ async def chat(request: ChatRequest):
                     "id": f"user_{uuid.uuid4().hex[:12]}",
                     "role": "user",
                     "content": request.question,
+                    "page_reference_groups": [group.model_dump() for group in request.page_reference_groups],
                     "timestamp": ts,
                 }
                 assistant_msg = {
@@ -237,7 +256,9 @@ async def chat(request: ChatRequest):
 
             if has_partial_index:
                 hint = "根据现有片段无法确认。当前问题在已建立的文档索引中未检索到匹配内容。"
-                if request.allowed_pages:
+                if request.page_reference_groups:
+                    hint += " 可尝试检查页面组是否选得过窄，或换一个更接近原文的关键词再试。"
+                elif effective_allowed_pages:
                     hint += " 可尝试放宽页码范围，或换一个更接近原文的关键词再试。"
                 else:
                     hint += " 可尝试换一个更接近原文的关键词，或限定到更相关的页码范围。"
@@ -273,6 +294,7 @@ async def chat(request: ChatRequest):
                     "id": f"user_{uuid.uuid4().hex[:12]}",
                     "role": "user",
                     "content": request.question,
+                    "page_reference_groups": [group.model_dump() for group in request.page_reference_groups],
                     "timestamp": ts,
                 }
                 assistant_msg = {
@@ -295,6 +317,7 @@ async def chat(request: ChatRequest):
             question=request.question,
             chunks=chunks,
             history=request.history,
+            page_reference_groups=request.page_reference_groups,
             zhipu_api_key=request.zhipu_api_key,
             deepseek_api_key=request.deepseek_api_key,
         ):
@@ -321,6 +344,7 @@ async def chat(request: ChatRequest):
                         "id": f"user_{uuid.uuid4().hex[:12]}",
                         "role": "user",
                         "content": request.question,
+                        "page_reference_groups": [group.model_dump() for group in request.page_reference_groups],
                         "timestamp": ts,
                     }
                     assistant_msg = {

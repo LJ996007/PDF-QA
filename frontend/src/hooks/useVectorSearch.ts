@@ -1,10 +1,12 @@
 import { useCallback } from 'react';
 import { resolveEffectiveMultimodalApiKey } from '../constants/multimodal';
+import { appendPageReferenceGroupsToHistoryContent } from '../utils/chatPageReferences';
 import { useDocumentStore } from '../stores/documentStore';
 import type {
     AuditProfile,
     AuditProfileRule,
     ChatMessage,
+    ChatPageReferenceGroup,
     ComplianceItem,
     LegacyAuditType,
     MultimodalAuditItem,
@@ -262,17 +264,31 @@ export function useVectorSearch() {
     const effectiveMultimodalApiKey = resolveEffectiveMultimodalApiKey(config);
 
     const askQuestion = useCallback(
-        async (question: string, opts?: { useContext?: boolean; allowedPages?: number[]; useVision?: boolean }): Promise<void> => {
+        async (
+            question: string,
+            opts?: {
+                useContext?: boolean;
+                allowedPages?: number[];
+                useVision?: boolean;
+                pageReferenceGroups?: ChatPageReferenceGroup[];
+            }
+        ): Promise<void> => {
             if (!currentDocument) {
                 throw new Error('未打开任何文档');
             }
 
             const useContext = opts?.useContext !== false;
+            const pageReferenceGroups = Array.isArray(opts?.pageReferenceGroups) ? opts.pageReferenceGroups : [];
             const historyPayload = useContext
                 ? messages
                       .filter((m) => !m.isStreaming)
                       .slice(-20)
-                      .map((m) => ({ role: m.role, content: m.content }))
+                      .map((m) => ({
+                          role: m.role,
+                          content: m.role === 'user'
+                              ? appendPageReferenceGroupsToHistoryContent(m.content, m.pageReferenceGroups || [])
+                              : m.content,
+                      }))
                 : [];
 
             const userMessageId = `user_${Date.now()}`;
@@ -281,6 +297,7 @@ export function useVectorSearch() {
                 role: 'user',
                 content: question,
                 references: [],
+                pageReferenceGroups,
                 activeRefs: [],
                 timestamp: new Date(),
             });
@@ -312,6 +329,9 @@ export function useVectorSearch() {
                         deepseek_api_key: config.deepseekApiKey,
                         ...(opts?.allowedPages && opts.allowedPages.length > 0
                             ? { allowed_pages: opts.allowedPages }
+                            : {}),
+                        ...(pageReferenceGroups.length > 0
+                            ? { page_reference_groups: pageReferenceGroups }
                             : {}),
                         ...(opts?.useVision
                             ? {
@@ -593,6 +613,11 @@ export function useVectorSearch() {
                 return raw.map((m: any) => {
                     const ts = m.timestamp ? new Date(m.timestamp) : new Date();
                     const refs = Array.isArray(m.references) ? m.references : [];
+                    const pageReferenceGroups = Array.isArray(m.page_reference_groups)
+                        ? m.page_reference_groups
+                        : Array.isArray(m.pageReferenceGroups)
+                            ? m.pageReferenceGroups
+                            : [];
                     const mappedRefs: TextChunk[] = refs
                         .map((r: any) => ({
                             id:
@@ -613,6 +638,7 @@ export function useVectorSearch() {
                         role: m.role,
                         content: m.content || '',
                         references: mappedRefs,
+                        pageReferenceGroups,
                         activeRefs: [],
                         timestamp: ts,
                         isStreaming: false,

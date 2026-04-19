@@ -1,0 +1,32 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - heading "PDF 智能问答系统" [level=1] [ref=e6]
+      - generic [ref=e7]: V6.0
+    - generic [ref=e8]:
+      - button "新增文件" [ref=e9] [cursor=pointer]
+      - button "设置" [ref=e10] [cursor=pointer]
+  - main [ref=e11]:
+    - generic [ref=e13]:
+      - generic [ref=e14]: PDF
+      - heading "上传文档" [level=2] [ref=e15]
+      - paragraph [ref=e16]: 拖拽文件到此处，或点击选择文件。
+      - button "选择文件" [ref=e17] [cursor=pointer]
+      - generic [ref=e18]:
+        - generic [ref=e19]: 历史记录
+        - generic [ref=e20]: 加载中...
+    - generic [ref=e23]:
+      - generic [ref=e24]:
+        - button "智能问答" [ref=e25] [cursor=pointer]
+        - button "合规检查" [ref=e26] [cursor=pointer]
+        - button "专项审查" [ref=e27] [cursor=pointer]
+      - generic [ref=e29]:
+        - heading "📄 智能问答" [level=3] [ref=e31]
+        - generic [ref=e33]:
+          - generic [ref=e34]: 💬
+          - paragraph [ref=e35]: 开始提问，AI 将根据文档内容回答
+        - generic [ref=e36]:
+          - button "清空上下文" [disabled] [ref=e38]
+          - generic [ref=e39]:
+            - textbox "请先上传 PDF 文档" [disabled] [ref=e40]
+            - button "发送" [disabled] [ref=e41]

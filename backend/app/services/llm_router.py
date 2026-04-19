@@ -11,7 +11,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
 
-from app.models.schemas import TextChunk
+from app.models.schemas import ChatPageReferenceGroup, TextChunk
 
 
 class LLMRouter:
@@ -50,10 +50,60 @@ class LLMRouter:
             "5. 不要输出 JSON，不要追加与问题无关的模板化标题。"
         )
 
-    def _build_prompt(self, question: str, chunks: List[TextChunk]) -> str:
+    def _format_page_reference_group_ranges(self, pages: List[int]) -> str:
+        if not pages:
+            return ""
+
+        normalized = sorted({page for page in pages if page > 0})
+        if not normalized:
+            return ""
+
+        parts: List[str] = []
+        start = normalized[0]
+        end = normalized[0]
+
+        for page in normalized[1:]:
+            if page == end + 1:
+                end = page
+                continue
+
+            parts.append(str(start) if start == end else f"{start}-{end}")
+            start = page
+            end = page
+
+        parts.append(str(start) if start == end else f"{start}-{end}")
+        return "、".join(parts)
+
+    def _build_page_reference_group_section(
+        self,
+        page_reference_groups: Optional[List[ChatPageReferenceGroup]] = None,
+    ) -> str:
+        groups = [group for group in (page_reference_groups or []) if group.pages]
+        if not groups:
+            return ""
+
+        definitions = "\n".join(
+            f"{group.placeholder}=第{self._format_page_reference_group_ranges(group.pages)}页"
+            for group in groups
+        )
+        return (
+            "页面引用组定义：\n"
+            f"{definitions}\n\n"
+            "如果问题中出现【页面组X】，必须严格按上面的页码集合来理解、比较和总结，不得把不同页面组混为一谈。"
+        )
+
+    def _build_prompt(
+        self,
+        question: str,
+        chunks: List[TextChunk],
+        page_reference_groups: Optional[List[ChatPageReferenceGroup]] = None,
+    ) -> str:
         context_text = "\n\n".join(self._build_context_blocks(chunks))
+        page_reference_group_section = self._build_page_reference_group_section(page_reference_groups)
+        page_reference_group_prefix = f"{page_reference_group_section}\n\n" if page_reference_group_section else ""
         return (
             "你是一个严谨的文档问答助手。请仅基于给定文档片段作答，不得臆测。\n\n"
+            f"{page_reference_group_prefix}"
             "文档片段：\n"
             "---\n"
             f"{context_text}\n"
@@ -68,13 +118,17 @@ class LLMRouter:
         question: str,
         references: List[Dict[str, Any]],
         chunks: Optional[List[TextChunk]] = None,
+        page_reference_groups: Optional[List[ChatPageReferenceGroup]] = None,
     ) -> str:
         reference_catalog = "\n".join(self._build_reference_catalog(references))
         context_appendix = ""
         if chunks:
             context_appendix = "\n\n补充文本片段：\n" + "\n\n".join(self._build_context_blocks(chunks))
+        page_reference_group_section = self._build_page_reference_group_section(page_reference_groups)
+        page_reference_group_prefix = f"{page_reference_group_section}\n\n" if page_reference_group_section else ""
         return (
             "你是一个严谨的文档问答助手。请同时结合页面图像和给定证据回答用户问题，不得臆测。\n\n"
+            f"{page_reference_group_prefix}"
             "可用引用编号与证据：\n"
             f"{reference_catalog or '当前没有可用引用。'}"
             f"{context_appendix}\n\n"
@@ -90,13 +144,14 @@ class LLMRouter:
         question: str,
         chunks: List[TextChunk],
         history: List[Dict] = None,
+        page_reference_groups: Optional[List[ChatPageReferenceGroup]] = None,
         zhipu_api_key: str = None,
         deepseek_api_key: str = None,
     ) -> AsyncGenerator[dict, None]:
         """
         流式对话。
         """
-        prompt = self._build_prompt(question, chunks)
+        prompt = self._build_prompt(question, chunks, page_reference_groups)
 
         messages = []
         if history:

@@ -2333,7 +2333,14 @@ async def get_compliance_history(doc_id: str):
         raise HTTPException(status_code=404, detail="Document not found")
     data = document_store.load_compliance(doc_id)
     if not data:
-        raise HTTPException(status_code=404, detail="No compliance history")
+        return {
+            "version": 1,
+            "doc_id": doc_id,
+            "requirements": [],
+            "allowed_pages": [],
+            "results": [],
+            "markdown": "",
+        }
     return data
 
 
