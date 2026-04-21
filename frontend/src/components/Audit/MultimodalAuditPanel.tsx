@@ -274,34 +274,6 @@ export const MultimodalAuditPanel: React.FC = () => {
         }
     };
 
-    const handleSaveAsProfile = async () => {
-        const validationMessage = validateDraft(currentDraft);
-        if (validationMessage) {
-            window.alert(validationMessage);
-            return;
-        }
-        if (!currentDraft) return;
-
-        setProfileBusy(true);
-        setProfileError('');
-        try {
-            const payload = buildPayloadFromDraft({
-                ...currentDraft,
-                name: currentDraft.name.trim().endsWith('副本')
-                    ? currentDraft.name.trim()
-                    : `${currentDraft.name.trim()} 副本`,
-            });
-            const created = await createAuditProfile(payload);
-            await loadProfiles(created.id);
-        } catch (error) {
-            const message = error instanceof Error ? error.message : '另存为审核模板失败';
-            setProfileError(message);
-            window.alert(message);
-        } finally {
-            setProfileBusy(false);
-        }
-    };
-
     const handleDeleteProfile = async () => {
         if (!currentDraft) return;
         const confirmed = window.confirm(`确定删除审核模板“${currentDraft.name}”吗？`);
@@ -494,14 +466,19 @@ export const MultimodalAuditPanel: React.FC = () => {
                     <button type="button" className="audit-secondary-btn" onClick={handleCreateProfile} disabled={profileBusy || profilesLoading || isRunning}>
                         新建
                     </button>
-                    <button type="button" className="audit-secondary-btn" onClick={handleSaveAsProfile} disabled={profileBusy || profilesLoading || !currentDraft || isRunning}>
-                        另存为
-                    </button>
                     <button type="button" className="audit-secondary-btn primary" onClick={handleSaveProfile} disabled={profileBusy || profilesLoading || !currentDraft || isRunning}>
                         保存
                     </button>
                     <button type="button" className="audit-secondary-btn danger" onClick={handleDeleteProfile} disabled={profileBusy || profilesLoading || !currentDraft || isRunning}>
                         删除
+                    </button>
+                    <button
+                        type="button"
+                        className="audit-secondary-btn audit-run-btn"
+                        onClick={submitAudit}
+                        disabled={!currentDocument || isRunning || profilesLoading || profileBusy || !currentDraft}
+                    >
+                        {isRunning ? '审查中...' : '审查'}
                     </button>
                 </div>
             </div>
@@ -624,13 +601,6 @@ export const MultimodalAuditPanel: React.FC = () => {
                     </div>
                 </div>
 
-                <button
-                    className="audit-submit-btn"
-                    onClick={submitAudit}
-                    disabled={!currentDocument || isRunning || profilesLoading || profileBusy || !currentDraft}
-                >
-                    {isRunning ? '审核中...' : '启动专项审核'}
-                </button>
             </div>
 
             {(profilesLoading || profileError || isDraftDirty) && (

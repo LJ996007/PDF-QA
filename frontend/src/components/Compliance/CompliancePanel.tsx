@@ -225,18 +225,18 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
                             >
                                 清空已选页
                             </button>
+                            <button
+                                className="check-btn"
+                                onClick={handleCheck}
+                                disabled={loading || !currentDocumentId}
+                            >
+                                {loading ? '正在检查...' : '开始合规性检查'}
+                            </button>
                         </div>
                         <div className="page-scope-hint">
                             已选页和人工页码会自动合并；都为空时默认分析全部已识别页。
                         </div>
                     </div>
-                    <button
-                        className="check-btn"
-                        onClick={handleCheck}
-                        disabled={loading || !currentDocumentId}
-                    >
-                        {loading ? '正在检查...' : '开始合规性检查'}
-                    </button>
                 </div>
             </div>
 

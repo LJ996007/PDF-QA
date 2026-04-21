@@ -82,7 +82,6 @@
 }
 
 .audit-secondary-btn:disabled,
-.audit-submit-btn:disabled,
 .audit-rule-remove:disabled {
     opacity: 0.6;
     cursor: not-allowed;
@@ -165,17 +164,10 @@
     cursor: pointer;
 }
 
-.audit-submit-btn {
-    grid-column: 1 / -1;
-    justify-self: end;
-    border: none;
-    border-radius: 8px;
+.audit-run-btn {
+    border-color: #0f62fe;
     background: #0f62fe;
     color: #fff;
-    font-size: 13px;
-    font-weight: 600;
-    padding: 8px 16px;
-    cursor: pointer;
 }
 
 .audit-profile-banner {
@@ -338,7 +330,6 @@
     }
 
     .audit-profile-actions .audit-secondary-btn,
-    .audit-submit-btn,
     .audit-rules-header .audit-secondary-btn {
         width: 100%;
     }

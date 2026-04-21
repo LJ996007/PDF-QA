@@ -61,7 +61,7 @@
 
 .req-input {
     width: 100%;
-    min-height: 168px;
+    min-height: 42px;
     height: 196px;
     padding: 12px;
     border: 1px solid #ddd;
@@ -85,7 +85,8 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    min-width: 0;
 }
 
 .page-scope-inline-group {
@@ -96,11 +97,11 @@
 }
 
 .page-scope-inline-group--selected {
-    flex: 1 1 180px;
+    flex: 0.95 1 180px;
 }
 
 .page-scope-inline-group--manual {
-    flex: 1.6 1 280px;
+    flex: 1.45 1 280px;
 }
 
 .page-scope-inline-label {
@@ -177,7 +178,7 @@
 }
 
 .check-btn {
-    align-self: flex-end;
+    flex: 0 0 auto;
     padding: 8px 16px;
     background: #1a73e8;
     color: white;
@@ -190,6 +191,17 @@
 .check-btn:disabled {
     background: #ccc;
     cursor: not-allowed;
+}
+
+@media (max-width: 960px) {
+    .page-scope-toolbar {
+        flex-wrap: wrap;
+    }
+
+    .page-scope-inline-group--selected,
+    .page-scope-inline-group--manual {
+        flex: 1 1 100%;
+    }
 }
 
 .results-section {
