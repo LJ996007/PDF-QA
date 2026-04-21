@@ -267,25 +267,50 @@ export const ChatPanel: React.FC = () => {
                         </label>
                     )}
                     {currentDocument && (
-                        <button
-                            type="button"
-                            className={`page-reference-toggle-btn ${!isPageReferencePanelCollapsed ? 'is-open' : ''}`}
-                            onClick={() => setIsPageReferencePanelCollapsed((prev) => !prev)}
-                            aria-expanded={!isPageReferencePanelCollapsed}
-                        >
-                            <span className="page-reference-toggle-label">引用页面</span>
-                            {pageReferenceGroups.length > 0 && (
-                                <span className="page-reference-header-count">
-                                    已建 {pageReferenceGroups.length} 组
-                                </span>
-                            )}
-                            <span
-                                className={`page-reference-chevron ${!isPageReferencePanelCollapsed ? 'is-open' : ''}`}
-                                aria-hidden="true"
+                        <div className="page-reference-toolbar-group">
+                            <button
+                                type="button"
+                                className={`page-reference-toggle-btn ${!isPageReferencePanelCollapsed ? 'is-open' : ''}`}
+                                onClick={() => setIsPageReferencePanelCollapsed((prev) => !prev)}
+                                aria-expanded={!isPageReferencePanelCollapsed}
                             >
-                                ⌄
-                            </span>
-                        </button>
+                                <span className="page-reference-toggle-label">引用页面</span>
+                                <span
+                                    className={`page-reference-chevron ${!isPageReferencePanelCollapsed ? 'is-open' : ''}`}
+                                    aria-hidden="true"
+                                >
+                                    ⌄
+                                </span>
+                            </button>
+                            {(selectedPages.length > 0 || pageReferenceGroups.length > 0) && (
+                                <div
+                                    className="page-reference-inline-summary"
+                                    title={[
+                                        selectedPages.length > 0
+                                            ? `左侧已选 ${formatPageSelectionLabel(selectedPages)}`
+                                            : '',
+                                        ...pageReferenceGroups.map((group) => `${group.placeholder} ${formatPageSelectionLabel(group.pages)}`),
+                                    ].filter(Boolean).join('；')}
+                                >
+                                    {selectedPages.length > 0 && (
+                                        <span className="page-reference-inline-chip page-reference-inline-chip--selected">
+                                            <span className="page-reference-inline-placeholder">已选</span>
+                                            <span className="page-reference-inline-pages">
+                                                {formatPageSelectionLabel(selectedPages)}
+                                            </span>
+                                        </span>
+                                    )}
+                                    {pageReferenceGroups.map((group) => (
+                                        <span key={group.id} className="page-reference-inline-chip">
+                                            <span className="page-reference-inline-placeholder">{group.placeholder}</span>
+                                            <span className="page-reference-inline-pages">
+                                                {formatPageSelectionLabel(group.pages)}
+                                            </span>
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
                     )}
                     {currentDocument && (
                         <div className="page-range-selector">

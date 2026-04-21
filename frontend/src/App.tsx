@@ -1096,7 +1096,7 @@ function App() {
               className={`tab-btn ${rightPanelMode === 'compliance' ? 'active' : ''}`}
               onClick={() => setRightPanelMode('compliance')}
             >
-              合规检查
+              参数审查
             </button>
             <button
               className={`tab-btn ${rightPanelMode === 'audit' ? 'active' : ''}`}

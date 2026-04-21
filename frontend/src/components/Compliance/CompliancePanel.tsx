@@ -230,7 +230,7 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
                                 onClick={handleCheck}
                                 disabled={loading || !currentDocumentId}
                             >
-                                {loading ? '正在检查...' : '开始合规性检查'}
+                                {loading ? '正在检查...' : '开始审查'}
                             </button>
                         </div>
                         <div className="page-scope-hint">
@@ -258,7 +258,7 @@ export const CompliancePanel: React.FC<CompliancePanelProps> = ({ className }) =
                     </ReactMarkdown>
                 ) : (
                     <div className="empty-state">
-                        <p>输入技术要求后点击"开始合规性检查"</p>
+                        <p>输入技术要求后点击"开始审查"</p>
                     </div>
                 )}
             </div>
