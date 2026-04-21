@@ -174,6 +174,7 @@ export interface TabState {
     document: Document;
     pdfUrl: string | null;
     scale: number;
+    thumbnailScale: number;
     currentPage: number;
     highlights: TextChunk[];
     viewMode: ViewMode;
@@ -188,6 +189,26 @@ export interface TabState {
     rightPanelMode: RightPanelMode;
     progress: TabProgress | null;
 }
+
+type LegacyTabState = Partial<TabState> & {
+    complianceAllowedPagesText?: unknown;
+};
+
+type LegacyMultimodalAuditItem = Partial<MultimodalAuditItem> & {
+    check_key?: unknown;
+    check_title?: unknown;
+};
+
+type LegacyAppConfig = Partial<AppConfig> & {
+    dashscopeApiKey?: unknown;
+    qwenVlModel?: unknown;
+    customPrompts?: unknown;
+};
+
+type LegacyPromptTemplate = Partial<PromptTemplate> & {
+    createdAt?: unknown;
+    updatedAt?: unknown;
+};
 
 const DEFAULT_CONFIG: AppConfig = {
     apiBaseUrl: 'http://localhost:8000',
@@ -393,16 +414,19 @@ const normalizeAuditState = (audit: unknown): MultimodalAuditState => {
     const auditProfileDraft = normalizeAuditProfile(raw.auditProfileDraft)
         || (selectedProfile ? cloneAuditProfile(selectedProfile) : null);
     const itemsRaw = Array.isArray(raw.items) ? raw.items : [];
-    const items: MultimodalAuditItem[] = itemsRaw.map((item: any, idx: number) => ({
-        checkKey: String(item?.checkKey || item?.check_key || `item_${idx + 1}`),
-        checkTitle: String(item?.checkTitle || item?.check_title || `检查项 ${idx + 1}`),
-        status: ['pass', 'fail', 'needs_review', 'error'].includes(String(item?.status))
-            ? (item.status as MultimodalAuditItem['status'])
-            : 'needs_review',
-        reason: String(item?.reason || ''),
-        confidence: Number(item?.confidence || 0),
-        references: Array.isArray(item?.references) ? item.references : [],
-    }));
+    const items: MultimodalAuditItem[] = itemsRaw.map((item, idx: number) => {
+        const normalizedItem = (item && typeof item === 'object' ? item : {}) as LegacyMultimodalAuditItem;
+        return {
+            checkKey: String(normalizedItem.checkKey || normalizedItem.check_key || `item_${idx + 1}`),
+            checkTitle: String(normalizedItem.checkTitle || normalizedItem.check_title || `检查项 ${idx + 1}`),
+            status: ['pass', 'fail', 'needs_review', 'error'].includes(String(normalizedItem.status))
+                ? (normalizedItem.status as MultimodalAuditItem['status'])
+                : 'needs_review',
+            reason: String(normalizedItem.reason || ''),
+            confidence: Number(normalizedItem.confidence || 0),
+            references: Array.isArray(normalizedItem.references) ? normalizedItem.references : [],
+        };
+    });
 
     const summaryRaw = raw.summary as Partial<MultimodalAuditSummary> | undefined;
     const summary: MultimodalAuditSummary = {
@@ -453,6 +477,7 @@ const createTabState = (doc: Document, pdfUrl: string | null): TabState => ({
     document: doc,
     pdfUrl,
     scale: 1,
+    thumbnailScale: 1,
     currentPage: 1,
     highlights: [],
     viewMode: 'list',
@@ -470,7 +495,7 @@ const createTabState = (doc: Document, pdfUrl: string | null): TabState => ({
 
 const normalizeTabState = (tab: unknown, docId: string): TabState | null => {
     if (!tab || typeof tab !== 'object') return null;
-    const raw = tab as Partial<TabState>;
+    const raw = tab as LegacyTabState;
     const doc = raw.document;
     if (!doc || typeof doc !== 'object') return null;
 
@@ -507,6 +532,7 @@ const normalizeTabState = (tab: unknown, docId: string): TabState | null => {
         document: normalizedDoc,
         pdfUrl: typeof raw.pdfUrl === 'string' ? raw.pdfUrl : null,
         scale: Number(raw.scale || 1),
+        thumbnailScale: Number((raw as { thumbnailScale?: unknown }).thumbnailScale || 1),
         currentPage: Number(raw.currentPage || 1),
         highlights: Array.isArray(raw.highlights) ? raw.highlights : [],
         viewMode: raw.viewMode === 'grid' ? 'grid' : 'list',
@@ -516,7 +542,7 @@ const normalizeTabState = (tab: unknown, docId: string): TabState | null => {
         complianceResults: Array.isArray(raw.complianceResults) ? raw.complianceResults : [],
         complianceMarkdown: String(raw.complianceMarkdown || ''),
         complianceRequirements: String(raw.complianceRequirements || ''),
-        complianceAllowedPagesText: String((raw as any).complianceAllowedPagesText || ''),
+        complianceAllowedPagesText: String(raw.complianceAllowedPagesText || ''),
         audit: normalizeAuditState(raw.audit),
         rightPanelMode: raw.rightPanelMode === 'compliance'
             ? 'compliance'
@@ -537,6 +563,7 @@ interface DocumentState {
     pdfUrl: string | null;
 
     scale: number;
+    thumbnailScale: number;
     currentPage: number;
     highlights: TextChunk[];
     viewMode: ViewMode;
@@ -563,7 +590,7 @@ interface DocumentState {
     setTabMessages: (docId: string, messages: ChatMessage[]) => void;
     setTabViewerState: (
         docId: string,
-        patch: Partial<Pick<TabState, 'scale' | 'currentPage' | 'viewMode' | 'highlights' | 'selectedPages'>>
+        patch: Partial<Pick<TabState, 'scale' | 'thumbnailScale' | 'currentPage' | 'viewMode' | 'highlights' | 'selectedPages'>>
     ) => void;
     setTabProgress: (docId: string, progress: TabProgress | null) => void;
     setTabCompliance: (
@@ -587,6 +614,7 @@ interface DocumentState {
     setAuditState: (patch: Partial<MultimodalAuditState>) => void;
 
     setScale: (scale: number) => void;
+    setThumbnailScale: (scale: number) => void;
     setCurrentPage: (page: number) => void;
     setHighlights: (chunks: TextChunk[]) => void;
     addHighlight: (chunk: TextChunk) => void;
@@ -606,35 +634,39 @@ interface DocumentState {
     updateConfig: (config: Partial<AppConfig>) => void;
 }
 
-const normalizeStoredConfig = (rawConfig: any): AppConfig => {
+const normalizeStoredConfig = (rawConfig: unknown): AppConfig => {
+    const raw = (rawConfig && typeof rawConfig === 'object' ? rawConfig : {}) as LegacyAppConfig;
     const provider = normalizeMultimodalProvider(
-        rawConfig?.multimodalProvider
-        || ((rawConfig?.dashscopeApiKey || rawConfig?.qwenVlModel) ? 'qwen' : 'zhipu')
+        raw.multimodalProvider
+        || ((raw.dashscopeApiKey || raw.qwenVlModel) ? 'qwen' : 'zhipu')
     );
     const providerDefaults = getMultimodalDefaults(provider);
     const normalized = {
-        ...rawConfig,
+        ...raw,
         multimodalProvider: provider,
         multimodalApiKey: String(
-            rawConfig?.multimodalApiKey
-            || (provider === 'qwen' ? rawConfig?.dashscopeApiKey || '' : '')
+            raw.multimodalApiKey
+            || (provider === 'qwen' ? raw.dashscopeApiKey || '' : '')
         ),
-        multimodalBaseUrl: String(rawConfig?.multimodalBaseUrl || providerDefaults.baseUrl),
+        multimodalBaseUrl: String(raw.multimodalBaseUrl || providerDefaults.baseUrl),
         multimodalModel: String(
-            rawConfig?.multimodalModel
-            || (provider === 'qwen' ? rawConfig?.qwenVlModel || providerDefaults.model : providerDefaults.model)
+            raw.multimodalModel
+            || (provider === 'qwen' ? raw.qwenVlModel || providerDefaults.model : providerDefaults.model)
         ),
     };
 
     if (normalized.customPrompts) {
-        normalized.customPrompts = normalized.customPrompts.map((p: any) => ({
-            id: p.id,
-            name: p.name,
-            description: p.description,
-            content: p.content,
-            createdAt: p.createdAt ? new Date(p.createdAt) : new Date(),
-            updatedAt: p.updatedAt ? new Date(p.updatedAt) : new Date(),
-        }));
+        normalized.customPrompts = normalized.customPrompts.map((prompt) => {
+            const p = (prompt && typeof prompt === 'object' ? prompt : {}) as LegacyPromptTemplate;
+            return {
+                id: String(p.id || ''),
+                name: String(p.name || ''),
+                description: String(p.description || ''),
+                content: String(p.content || ''),
+                createdAt: p.createdAt ? new Date(p.createdAt) : new Date(),
+                updatedAt: p.updatedAt ? new Date(p.updatedAt) : new Date(),
+            };
+        });
     }
 
     if (!normalized?.customPrompts || normalized.customPrompts.length === 0) {
@@ -691,6 +723,7 @@ const syncActiveFromTabs = (state: DocumentState): void => {
     state.pdfUrl = tab?.pdfUrl || null;
 
     state.scale = tab?.scale ?? 1;
+    state.thumbnailScale = tab?.thumbnailScale ?? 1;
     state.currentPage = tab?.currentPage ?? 1;
     state.highlights = tab?.highlights ?? [];
     state.viewMode = tab?.viewMode ?? 'list';
@@ -728,6 +761,7 @@ export const useDocumentStore = create<DocumentState>()(
             pdfUrl: null,
 
             scale: 1,
+            thumbnailScale: 1,
             currentPage: 1,
             highlights: [],
             viewMode: 'list',
@@ -822,6 +856,7 @@ export const useDocumentStore = create<DocumentState>()(
                 if (!tab) return;
 
                 if (typeof patch.scale === 'number') tab.scale = patch.scale;
+                if (typeof patch.thumbnailScale === 'number') tab.thumbnailScale = patch.thumbnailScale;
                 if (typeof patch.currentPage === 'number') tab.currentPage = patch.currentPage;
                 if (patch.viewMode === 'grid' || patch.viewMode === 'list') tab.viewMode = patch.viewMode;
                 if (Array.isArray(patch.highlights)) tab.highlights = patch.highlights;
@@ -973,6 +1008,12 @@ export const useDocumentStore = create<DocumentState>()(
                 });
             }),
 
+            setThumbnailScale: (thumbnailScale) => set((state) => {
+                updateActiveTab(state, (tab) => {
+                    tab.thumbnailScale = thumbnailScale;
+                });
+            }),
+
             setCurrentPage: (page) => set((state) => {
                 updateActiveTab(state, (tab) => {
                     tab.currentPage = page;
@@ -1080,7 +1121,7 @@ export const useDocumentStore = create<DocumentState>()(
                     return persistedState as DocumentState;
                 }
 
-                const state = persistedState as Partial<DocumentState>;
+                const state = persistedState as Partial<DocumentState> & { complianceAllowedPagesText?: unknown };
                 const normalizedConfig = state.config ? normalizeStoredConfig(state.config) : initializeConfig();
                 const rawTabs = state.tabsByDocId && typeof state.tabsByDocId === 'object'
                     ? state.tabsByDocId
@@ -1100,11 +1141,12 @@ export const useDocumentStore = create<DocumentState>()(
                     tabsByDocId[state.currentDocument.id].highlights = Array.isArray(state.highlights) ? state.highlights : [];
                     tabsByDocId[state.currentDocument.id].viewMode = state.viewMode === 'grid' ? 'grid' : 'list';
                     tabsByDocId[state.currentDocument.id].scale = Number(state.scale || 1);
+                    tabsByDocId[state.currentDocument.id].thumbnailScale = Number((state as { thumbnailScale?: unknown }).thumbnailScale || 1);
                     tabsByDocId[state.currentDocument.id].currentPage = Number(state.currentPage || 1);
                     tabsByDocId[state.currentDocument.id].complianceResults = Array.isArray(state.complianceResults) ? state.complianceResults : [];
                     tabsByDocId[state.currentDocument.id].complianceMarkdown = String(state.complianceMarkdown || '');
                     tabsByDocId[state.currentDocument.id].complianceRequirements = String(state.complianceRequirements || '');
-                    tabsByDocId[state.currentDocument.id].complianceAllowedPagesText = String((state as any).complianceAllowedPagesText || '');
+                    tabsByDocId[state.currentDocument.id].complianceAllowedPagesText = String(state.complianceAllowedPagesText || '');
                     tabsByDocId[state.currentDocument.id].audit = createDefaultAuditState();
                     tabsByDocId[state.currentDocument.id].rightPanelMode = state.rightPanelMode === 'compliance'
                         ? 'compliance'
