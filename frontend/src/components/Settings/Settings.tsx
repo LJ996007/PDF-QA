@@ -17,6 +17,8 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
 
     const [zhipuKey, setZhipuKey] = useState(config.zhipuApiKey);
     const [deepseekKey, setDeepseekKey] = useState(config.deepseekApiKey);
+    const [mimoKey, setMimoKey] = useState(config.mimoApiKey || '');
+    const [llmProvider, setLlmProvider] = useState<'auto' | 'deepseek' | 'zhipu' | 'mimo'>(config.llmProvider || 'auto');
     const [multimodalProvider, setMultimodalProvider] = useState<MultimodalProvider>(config.multimodalProvider);
     const [multimodalApiKey, setMultimodalApiKey] = useState(config.multimodalApiKey || '');
     const [multimodalBaseUrl, setMultimodalBaseUrl] = useState(config.multimodalBaseUrl || getMultimodalDefaults(config.multimodalProvider).baseUrl);
@@ -26,6 +28,7 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
     const [baiduOcrToken, setBaiduOcrToken] = useState(config.baiduOcrToken || '');
 
     // 折叠状态
+    const [isTextLlmExpanded, setIsTextLlmExpanded] = useState(true);
     const [isOcrExpanded, setIsOcrExpanded] = useState(false);
     const [isMultimodalExpanded, setIsMultimodalExpanded] = useState(true);
 
@@ -33,6 +36,8 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
         if (!isOpen) return;
         setZhipuKey(config.zhipuApiKey);
         setDeepseekKey(config.deepseekApiKey);
+        setMimoKey(config.mimoApiKey || '');
+        setLlmProvider(config.llmProvider || 'auto');
         setMultimodalProvider(config.multimodalProvider);
         setMultimodalApiKey(config.multimodalApiKey || '');
         setMultimodalBaseUrl(config.multimodalBaseUrl || getMultimodalDefaults(config.multimodalProvider).baseUrl);
@@ -44,7 +49,6 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
     const applyProviderTemplate = (provider: MultimodalProvider) => {
         const defaults = getMultimodalDefaults(provider);
         setMultimodalProvider(provider);
-        setMultimodalApiKey('');
         setMultimodalBaseUrl(defaults.baseUrl);
         setMultimodalModel(defaults.model);
     };
@@ -53,6 +57,8 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
         updateConfig({
             zhipuApiKey: zhipuKey,
             deepseekApiKey: deepseekKey,
+            mimoApiKey: mimoKey,
+            llmProvider,
             multimodalProvider,
             multimodalApiKey: multimodalApiKey,
             multimodalBaseUrl: multimodalBaseUrl,
@@ -80,7 +86,17 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                         <div className="config-item">
                             <span className="config-label">LLM 模型</span>
                             <span className="config-value">
-                                {config.deepseekApiKey ? '🔵 DeepSeek' : '🟢 智谱 GLM'}
+                                {config.llmProvider === 'mimo' && config.mimoApiKey
+                                    ? '🟣 MiMo'
+                                    : config.llmProvider === 'zhipu'
+                                    ? '🟢 智谱 GLM'
+                                    : config.llmProvider === 'deepseek' && config.deepseekApiKey
+                                    ? '🔵 DeepSeek'
+                                    : config.deepseekApiKey
+                                    ? '🔵 DeepSeek'
+                                    : config.mimoApiKey
+                                    ? '🟣 MiMo'
+                                    : '🟢 智谱 GLM'}
                             </span>
                         </div>
                         <div className="config-item">
@@ -101,34 +117,92 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                         </div>
                     </div>
 
-                    {/* 智谱API Key */}
-                    <div className="setting-group">
-                        <label className="setting-label">
-                            智谱API Key
-                            <span className="setting-hint">用于 Embedding、文本问答；智谱多模态留空时也会复用这里的 Key</span>
-                        </label>
-                        <input
-                            type="password"
-                            className="setting-input"
-                            value={zhipuKey}
-                            onChange={(e) => setZhipuKey(e.target.value)}
-                            placeholder="sk-xxxxxxxx"
-                        />
-                    </div>
+                    {/* 文本模型设置（可折叠） */}
+                    <div className="setting-section">
+                        <button
+                            className="section-toggle"
+                            onClick={() => setIsTextLlmExpanded(!isTextLlmExpanded)}
+                        >
+                            <span className="section-title">
+                                📝 文本模型
+                                <span className="section-badge">
+                                    {llmProvider === 'auto' ? '自动' : llmProvider === 'deepseek' ? 'DeepSeek' : llmProvider === 'mimo' ? 'MiMo' : '智谱 GLM'}
+                                </span>
+                            </span>
+                            <span className={`toggle-icon ${isTextLlmExpanded ? 'expanded' : ''}`}>
+                                ▶
+                            </span>
+                        </button>
 
-                    {/* DeepSeek API Key */}
-                    <div className="setting-group">
-                        <label className="setting-label">
-                            DeepSeek API Key
-                            <span className="setting-hint">用于LLM推理（可选）</span>
-                        </label>
-                        <input
-                            type="password"
-                            className="setting-input"
-                            value={deepseekKey}
-                            onChange={(e) => setDeepseekKey(e.target.value)}
-                            placeholder="sk-xxxxxxxx（可选）"
-                        />
+                        {isTextLlmExpanded && (
+                            <div className="section-content">
+                                <div className="setting-group">
+                                    <label className="setting-label">
+                                        智谱API Key
+                                        <span className="setting-hint">用于 Embedding、文本问答；智谱多模态留空时也会复用这里的 Key</span>
+                                    </label>
+                                    <input
+                                        type="password"
+                                        className="setting-input"
+                                        value={zhipuKey}
+                                        onChange={(e) => setZhipuKey(e.target.value)}
+                                        placeholder="sk-xxxxxxxx"
+                                    />
+                                </div>
+
+                                <div className="setting-group">
+                                    <label className="setting-label">
+                                        DeepSeek API Key
+                                        <span className="setting-hint">用于LLM推理（可选）</span>
+                                    </label>
+                                    <input
+                                        type="password"
+                                        className="setting-input"
+                                        value={deepseekKey}
+                                        onChange={(e) => setDeepseekKey(e.target.value)}
+                                        placeholder="sk-xxxxxxxx（可选）"
+                                    />
+                                </div>
+
+                                <div className="setting-group">
+                                    <label className="setting-label">
+                                        MiMo API Key
+                                        <span className="setting-hint">小米 MiMo 大模型，用于LLM推理和多模态分析</span>
+                                    </label>
+                                    <input
+                                        type="password"
+                                        className="setting-input"
+                                        value={mimoKey}
+                                        onChange={(e) => setMimoKey(e.target.value)}
+                                        placeholder="sk-xxxxxxxx（可选）"
+                                    />
+                                </div>
+
+                                <div className="setting-group">
+                                    <label className="setting-label">
+                                        LLM 文本推理
+                                        <span className="setting-hint">选择用于智能问答的文本模型</span>
+                                    </label>
+                                    <div className="provider-selector">
+                                        {([
+                                            { key: 'auto', label: '自动（按优先级）' },
+                                            { key: 'deepseek', label: 'DeepSeek' },
+                                            { key: 'mimo', label: 'MiMo' },
+                                            { key: 'zhipu', label: '智谱 GLM' },
+                                        ] as Array<{ key: typeof llmProvider; label: string }>).map((opt) => (
+                                            <button
+                                                key={opt.key}
+                                                type="button"
+                                                className={`provider-btn ${llmProvider === opt.key ? 'active' : ''}`}
+                                                onClick={() => setLlmProvider(opt.key)}
+                                            >
+                                                {opt.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                     <div className="setting-section">
@@ -155,16 +229,27 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                                         <span className="setting-hint">智能问答和专项审查共用这套多模态配置</span>
                                     </label>
                                     <div className="provider-selector">
-                                        {(['zhipu', 'qwen', 'siliconflow'] as MultimodalProvider[]).map((provider) => (
+
+                                        {(['zhipu', 'qwen', 'siliconflow', 'mimo'] as MultimodalProvider[]).map((provider) => (
+
                                             <button
+
                                                 key={provider}
+
                                                 type="button"
+
                                                 className={`provider-btn ${multimodalProvider === provider ? 'active' : ''}`}
+
                                                 onClick={() => applyProviderTemplate(provider)}
+
                                             >
+
                                                 {MULTIMODAL_PROVIDER_DEFAULTS[provider].label}
+
                                             </button>
+
                                         ))}
+
                                     </div>
                                 </div>
 

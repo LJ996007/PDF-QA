@@ -20,6 +20,7 @@ class LLMRouter:
     def __init__(self):
         self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "")
         self.zhipu_api_key = os.getenv("ZHIPU_API_KEY", "")
+        self.mimo_api_key = os.getenv("MIMO_API_KEY", "")
 
     def _build_context_blocks(self, chunks: List[TextChunk]) -> List[str]:
         context_blocks: List[str] = []
@@ -147,6 +148,8 @@ class LLMRouter:
         page_reference_groups: Optional[List[ChatPageReferenceGroup]] = None,
         zhipu_api_key: str = None,
         deepseek_api_key: str = None,
+        mimo_api_key: str = None,
+        llm_provider: str = None,
     ) -> AsyncGenerator[dict, None]:
         """
         流式对话。
@@ -160,9 +163,24 @@ class LLMRouter:
 
         deepseek_key = deepseek_api_key or self.deepseek_api_key
         zhipu_key = zhipu_api_key or self.zhipu_api_key
+        mimo_key = mimo_api_key or self.mimo_api_key
 
-        if deepseek_key:
+        # 根据 llm_provider 参数或优先级选择 LLM
+        provider = (llm_provider or "").strip().lower()
+        if provider == "mimo" and mimo_key:
+            async for chunk in self._mimo_stream(messages, mimo_key):
+                yield chunk
+        elif provider == "deepseek" and deepseek_key:
             async for chunk in self._deepseek_stream(messages, deepseek_key):
+                yield chunk
+        elif provider == "zhipu" and zhipu_key:
+            async for chunk in self._zhipu_stream(messages, zhipu_key):
+                yield chunk
+        elif deepseek_key:
+            async for chunk in self._deepseek_stream(messages, deepseek_key):
+                yield chunk
+        elif mimo_key:
+            async for chunk in self._mimo_stream(messages, mimo_key):
                 yield chunk
         elif zhipu_key:
             async for chunk in self._zhipu_stream(messages, zhipu_key):
@@ -170,7 +188,7 @@ class LLMRouter:
         else:
             yield {
                 "type": "error",
-                "content": "未配置API Key，请设置DEEPSEEK_API_KEY或ZHIPU_API_KEY",
+                "content": "未配置API Key，请设置DEEPSEEK_API_KEY、MIMO_API_KEY或ZHIPU_API_KEY",
             }
 
     async def _deepseek_stream(self, messages: List[Dict], api_key: str) -> AsyncGenerator[dict, None]:
@@ -259,22 +277,85 @@ class LLMRouter:
                     except (json.JSONDecodeError, KeyError):
                         continue
 
+    async def _mimo_stream(self, messages: List[Dict], api_key: str) -> AsyncGenerator[dict, None]:
+        """小米 MiMo 流式调用。"""
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            async with client.stream(
+                "POST",
+                "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": "mimo-v2.5-pro",
+                    "messages": messages,
+                    "stream": True,
+                    "max_tokens": 4096,
+                    "temperature": 1.0,
+                    "top_p": 0.95,
+                },
+            ) as response:
+                response.raise_for_status()
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        yield {"type": "done", "content": ""}
+                        break
+
+                    try:
+                        chunk_data = json.loads(data)
+                        delta = chunk_data["choices"][0].get("delta", {})
+                        content = delta.get("content", "")
+
+                        if content:
+                            yield {
+                                "type": "content",
+                                "content": content,
+                                "active_refs": self.extract_ref_ids(content),
+                            }
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+
     async def chat_completion(
         self,
         messages: List[Dict],
         api_key: str = None,
         json_mode: bool = False,
+        llm_provider: str = None,
     ) -> Any:
         """非流式对话，支持 JSON 模式。"""
 
         deepseek_key = api_key or self.deepseek_api_key
         zhipu_key = api_key or self.zhipu_api_key
+        mimo_key = api_key or self.mimo_api_key
 
         url = ""
         headers = {}
         payload = {}
 
-        if deepseek_key:
+        provider = (llm_provider or "").strip().lower()
+
+        if provider == "mimo" and mimo_key:
+            url = "https://api.xiaomimimo.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {mimo_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "mimo-v2.5-pro",
+                "messages": messages,
+                "stream": False,
+                "max_tokens": 4096,
+                "temperature": 1.0,
+                "top_p": 0.95,
+            }
+        elif provider == "deepseek" and deepseek_key:
             url = "https://api.deepseek.com/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {deepseek_key}",
@@ -288,7 +369,46 @@ class LLMRouter:
             }
             if json_mode:
                 payload["response_format"] = {"type": "json_object"}
-
+        elif provider == "zhipu" and zhipu_key:
+            url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {zhipu_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "glm-4.7",
+                "messages": messages,
+                "stream": False,
+                "max_tokens": 4096,
+            }
+        elif deepseek_key:
+            url = "https://api.deepseek.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {deepseek_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "deepseek-chat",
+                "messages": messages,
+                "stream": False,
+                "max_tokens": 4096,
+            }
+            if json_mode:
+                payload["response_format"] = {"type": "json_object"}
+        elif mimo_key:
+            url = "https://api.xiaomimimo.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {mimo_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "mimo-v2.5-pro",
+                "messages": messages,
+                "stream": False,
+                "max_tokens": 4096,
+                "temperature": 1.0,
+                "top_p": 0.95,
+            }
         elif zhipu_key:
             url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
             headers = {

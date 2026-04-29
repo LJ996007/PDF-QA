@@ -58,6 +58,7 @@ export const ChatPanel: React.FC = () => {
     const { askQuestion } = useVectorSearch();
 
     const [inputValue, setInputValue] = useState('');
+    const [inputHeight, setInputHeight] = useState<number>(0); // 0 = auto
     const [pageFrom, setPageFrom] = useState('');
     const [pageTo, setPageTo] = useState('');
     const [manualGroupPagesText, setManualGroupPagesText] = useState('');
@@ -66,6 +67,7 @@ export const ChatPanel: React.FC = () => {
     const [useVision, setUseVision] = useState(true);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
+    const dragStateRef = useRef({ startY: 0, startHeight: 0, dragging: false });
     const pageReferenceGroupIdRef = useRef(0);
     const multimodalReady = isMultimodalConfigured(config);
     const effectiveMultimodalApiKey = resolveEffectiveMultimodalApiKey(config);
@@ -74,6 +76,30 @@ export const ChatPanel: React.FC = () => {
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
+
+    const handleResizeStart = (e: React.MouseEvent) => {
+        e.preventDefault();
+        const textarea = inputRef.current;
+        if (!textarea) return;
+        const currentHeight = textarea.getBoundingClientRect().height;
+        dragStateRef.current = { startY: e.clientY, startHeight: currentHeight, dragging: true };
+
+        const handleMove = (ev: MouseEvent) => {
+            if (!dragStateRef.current.dragging) return;
+            const delta = dragStateRef.current.startY - ev.clientY; // up = positive
+            const newHeight = Math.min(300, Math.max(40, dragStateRef.current.startHeight + delta));
+            setInputHeight(newHeight);
+        };
+
+        const handleUp = () => {
+            dragStateRef.current.dragging = false;
+            window.removeEventListener('mousemove', handleMove);
+            window.removeEventListener('mouseup', handleUp);
+        };
+
+        window.addEventListener('mousemove', handleMove);
+        window.addEventListener('mouseup', handleUp);
+    };
 
     const insertTextAtCursor = (text: string) => {
         const textarea = inputRef.current;
@@ -452,16 +478,20 @@ export const ChatPanel: React.FC = () => {
                 )}
 
                 <div className="chat-input-row">
-                    <textarea
-                        ref={inputRef}
-                        className="chat-input"
-                        value={inputValue}
-                        onChange={(e) => setInputValue(e.target.value)}
-                        onKeyDown={handleKeyDown}
-                        placeholder={currentDocument ? '输入问题，按 Enter 发送...' : '请先上传 PDF 文档'}
-                        disabled={!currentDocument || isLoading}
-                        rows={2}
-                    />
+                    <div className="chat-input-wrapper">
+                        <textarea
+                            ref={inputRef}
+                            className="chat-input"
+                            value={inputValue}
+                            onChange={(e) => setInputValue(e.target.value)}
+                            onKeyDown={handleKeyDown}
+                            placeholder={currentDocument ? '输入问题，按 Enter 发送...' : '请先上传 PDF 文档'}
+                            disabled={!currentDocument || isLoading}
+                            rows={2}
+                            style={inputHeight > 0 ? { height: `${inputHeight}px` } : undefined}
+                        />
+                        <div className="resize-handle" onMouseDown={handleResizeStart} title="拖动调整高度" />
+                    </div>
                     <button
                         className="send-btn"
                         onClick={handleSend}

@@ -46,6 +46,7 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
     const [isSearching, setIsSearching] = useState(false);
     const [thumbnailPaneWidth, setThumbnailPaneWidth] = useState(320);
     const [isSplitResizing, setIsSplitResizing] = useState(false);
+    const [isThumbnailFullscreen, setIsThumbnailFullscreen] = useState(false);
     const [isStackedLayout, setIsStackedLayout] = useState<boolean>(() => (
         typeof window !== 'undefined' ? window.innerWidth <= 1180 : false
     ));
@@ -58,6 +59,7 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
     const pendingNavigationPageRef = useRef<number | null>(null);
     const prevScaleRef = useRef(scale);
     const splitResizeStateRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+    const lastSelectedPageRef = useRef<number | null>(null);
 
     const activeDocId = currentDocument?.id ?? '';
     const isRecognizing = activeProgress?.stage === 'ocr';
@@ -91,6 +93,15 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
         window.addEventListener('resize', handleWindowResize);
         return () => window.removeEventListener('resize', handleWindowResize);
     }, []);
+
+    useEffect(() => {
+        if (!isThumbnailFullscreen) return;
+        const handleEsc = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setIsThumbnailFullscreen(false);
+        };
+        window.addEventListener('keydown', handleEsc);
+        return () => window.removeEventListener('keydown', handleEsc);
+    }, [isThumbnailFullscreen]);
 
     useEffect(() => {
         const load = async () => {
@@ -236,13 +247,24 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
         window.requestAnimationFrame(() => attemptScroll(6));
     }, [scale, setCurrentPage]);
 
-    const handleTogglePageSelection = useCallback((pageNumber: number) => {
+    const handleTogglePageSelection = useCallback((pageNumber: number, event?: React.MouseEvent) => {
         const next = new Set(selectedPages);
-        if (next.has(pageNumber)) {
-            next.delete(pageNumber);
+
+        if (event?.shiftKey && lastSelectedPageRef.current != null) {
+            const start = Math.min(lastSelectedPageRef.current, pageNumber);
+            const end = Math.max(lastSelectedPageRef.current, pageNumber);
+            for (let p = start; p <= end; p++) {
+                next.add(p);
+            }
         } else {
-            next.add(pageNumber);
+            if (next.has(pageNumber)) {
+                next.delete(pageNumber);
+            } else {
+                next.add(pageNumber);
+            }
         }
+
+        lastSelectedPageRef.current = pageNumber;
         setSelectedPages(Array.from(next));
     }, [selectedPages, setSelectedPages]);
 
@@ -539,6 +561,17 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
                             </div>
 
                             <span className="selection-indicator selection-indicator--chip">已选 {selectedPagesSorted.length}</span>
+                            {selectedPagesSorted.length > 0 && (
+                                <button
+                                    type="button"
+                                    className="panel-icon-btn panel-icon-btn--compact"
+                                    onClick={() => setSelectedPages([])}
+                                    title="取消所有选择"
+                                    aria-label="取消所有选择"
+                                >
+                                    ✕
+                                </button>
+                            )}
 
                             <button
                                 type="button"
@@ -568,6 +601,15 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
                                 title={isRecognizing ? '正在识别选中未识别页' : '识别选中未识别页'}
                             >
                                 {isRecognizing ? '识别中' : '识别'}
+                            </button>
+                            <button
+                                type="button"
+                                className="panel-icon-btn panel-icon-btn--compact"
+                                onClick={() => setIsThumbnailFullscreen(true)}
+                                title="全屏浏览缩略图"
+                                aria-label="全屏浏览缩略图"
+                            >
+                                ⛶
                             </button>
                         </div>
                     </div>
@@ -693,6 +735,69 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ pdfUrl, pdfFile, onRecogni
                     </div>
                 </section>
             </div>
+
+            {isThumbnailFullscreen && (
+                <div
+                    className="thumbnail-fullscreen-overlay"
+                    onClick={(e) => {
+                        if (e.target === e.currentTarget) setIsThumbnailFullscreen(false);
+                    }}
+                >
+                    <div className="thumbnail-fullscreen-header">
+                        <span className="thumbnail-fullscreen-title">缩略图浏览 · 共 {pdfResult.numPages} 页</span>
+                        <div className="thumbnail-toolbar-group thumbnail-toolbar-group--compact">
+                            <button type="button" className="panel-icon-btn panel-icon-btn--compact" onClick={() => handleThumbnailZoom(0.9)} title="缩小">
+                                <span>-</span>
+                            </button>
+                            <span className="zoom-level thumbnail-zoom-level">{thumbnailZoomLabel}</span>
+                            <button type="button" className="panel-icon-btn panel-icon-btn--compact" onClick={() => handleThumbnailZoom(1.1)} title="放大">
+                                <span>+</span>
+                            </button>
+                        </div>
+                        <span className="selection-indicator selection-indicator--chip">已选 {selectedPagesSorted.length}</span>
+                        {selectedPagesSorted.length > 0 && (
+                            <button type="button" className="panel-icon-btn panel-icon-btn--compact" onClick={() => setSelectedPages([])} title="取消所有选择">
+                                ✕
+                            </button>
+                        )}
+                        <button type="button" className="panel-icon-btn panel-icon-btn--compact" onClick={() => previousSelectedPage && navigateToPage(previousSelectedPage)} disabled={!previousSelectedPage} title="上一已选页">
+                            ↑
+                        </button>
+                        <button type="button" className="panel-icon-btn panel-icon-btn--compact" onClick={() => nextSelectedPage && navigateToPage(nextSelectedPage)} disabled={!nextSelectedPage} title="下一已选页">
+                            ↓
+                        </button>
+                        <button type="button" className="panel-action-btn panel-action-btn--compact" onClick={() => setIsThumbnailFullscreen(false)} title="退出全屏 (Esc)">
+                            ✕ 退出
+                        </button>
+                    </div>
+                    <div className="thumbnail-fullscreen-body">
+                        <div
+                            className="thumbnail-grid"
+                            style={{ '--thumbnail-card-width': `${thumbnailCardWidth}px` } as React.CSSProperties}
+                        >
+                            {Array.from({ length: pdfResult.numPages }, (_, index) => {
+                                const pageNumber = index + 1;
+                                return (
+                                    <PageGridItem
+                                        key={pageNumber}
+                                        pageNumber={pageNumber}
+                                        thumbnail={thumbnails[pageNumber - 1]}
+                                        status={pageStatuses[pageNumber] || 'unrecognized'}
+                                        selected={selectedPagesSorted.includes(pageNumber)}
+                                        active={currentPage === pageNumber}
+                                        thumbnailWidth={thumbnailCardWidth}
+                                        onNavigate={(page) => {
+                                            navigateToPage(page);
+                                            setIsThumbnailFullscreen(false);
+                                        }}
+                                        onToggleSelect={handleTogglePageSelection}
+                                    />
+                                );
+                            })}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

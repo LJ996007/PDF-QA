@@ -327,6 +327,8 @@ export function useVectorSearch() {
                         history: historyPayload,
                         zhipu_api_key: config.zhipuApiKey,
                         deepseek_api_key: config.deepseekApiKey,
+                        mimo_api_key: config.mimoApiKey || undefined,
+                        llm_provider: config.llmProvider !== 'auto' ? config.llmProvider : undefined,
                         ...(opts?.allowedPages && opts.allowedPages.length > 0
                             ? { allowed_pages: opts.allowedPages }
                             : {}),
@@ -818,6 +820,36 @@ export function useVectorSearch() {
 
             eventSource.onerror = () => {
                 eventSource.close();
+                // SSE 断开时，通过 HTTP 轮询回退获取结果
+                const pollResult = (retries: number) => {
+                    fetch(`${API_BASE}/documents/${docId}/multimodal_audit/jobs/${jobId}`)
+                        .then(async (resp) => {
+                            if (!resp.ok) return;
+                            const data = await resp.json();
+                            if (data?.status === 'completed') {
+                                onProgress({
+                                    status: 'completed',
+                                    stage: 'completed',
+                                    current: 100,
+                                    total: 100,
+                                    message: 'Audit completed.',
+                                } as MultimodalAuditProgressEvent);
+                            } else if (data?.status === 'failed') {
+                                onProgress({
+                                    status: 'failed',
+                                    stage: 'failed',
+                                    current: 100,
+                                    total: 100,
+                                    message: data?.error || 'Audit failed.',
+                                } as MultimodalAuditProgressEvent);
+                            } else if (retries > 0) {
+                                // 后端仍在处理中，2 秒后重试
+                                setTimeout(() => pollResult(retries - 1), 2000);
+                            }
+                        })
+                        .catch(() => {});
+                };
+                pollResult(5); // 最多重试 5 次，覆盖 ~10 秒
             };
 
             return () => eventSource.close();

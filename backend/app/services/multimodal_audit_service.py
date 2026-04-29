@@ -110,7 +110,7 @@ class MultimodalAuditService:
             "2. page 必须是当前批次中实际存在的页码。\n"
             "3. evidence_text 必须摘录页面上可见的直接证据原文。\n"
             "4. status 只能是 pass、fail、needs_review。\n"
-            "5. reason 要简洁，明确说明通过、不通过或需复核的依据。\n"
+            "5. reason 要详细，明确写出通过、不通过或需复核的具体依据，引用页面上的关键信息。\n"
             "6. 若当前批次无法支持判断，就不要输出该审核项。"
         )
 

@@ -671,3 +671,96 @@
     margin: 10px auto;
   }
 }
+
+/* ── 缩略图全屏模式 ────────────────────────────── */
+.thumbnail-fullscreen-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(15, 23, 42, 0.92);
+  display: flex;
+  flex-direction: column;
+  animation: fadeIn 0.2s ease;
+}
+
+.thumbnail-fullscreen-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  background: rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  flex-shrink: 0;
+}
+
+.thumbnail-fullscreen-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #f1f5f9;
+  margin-right: auto;
+}
+
+.thumbnail-fullscreen-header .zoom-level,
+.thumbnail-fullscreen-header .selection-indicator--chip {
+  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.thumbnail-fullscreen-header .panel-icon-btn--compact {
+  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.thumbnail-fullscreen-header .panel-icon-btn--compact:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.thumbnail-fullscreen-header .panel-icon-btn--compact:disabled {
+  opacity: 0.3;
+}
+
+.thumbnail-fullscreen-header .panel-action-btn--compact {
+  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-weight: 500;
+}
+
+.thumbnail-fullscreen-header .panel-action-btn--compact:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.thumbnail-fullscreen-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.thumbnail-fullscreen-body .thumbnail-grid {
+  --thumbnail-card-width: 180px;
+  gap: 16px;
+}
+
+.thumbnail-fullscreen-body .page-grid-item {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.thumbnail-fullscreen-body .page-grid-item.selected {
+  border-color: rgba(59, 130, 246, 0.7);
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.thumbnail-fullscreen-body .page-grid-item.active {
+  border-color: rgba(59, 130, 246, 0.5);
+}
+
+.thumbnail-fullscreen-body .page-grid-meta {
+  color: #e2e8f0;
+}
+
+.thumbnail-fullscreen-body .page-grid-status {
+  color: #cbd5e1;
+}

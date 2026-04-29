@@ -110,32 +110,34 @@ class ChatPageReferenceGroup(BaseModel):
         return self
 
 
-class ChatRequest(BaseModel):
-    """Chat request."""
-
-    document_id: str
-    question: str
-    history: List[dict] = Field(default_factory=list)
-    zhipu_api_key: Optional[str] = None
-    deepseek_api_key: Optional[str] = None
-    allowed_pages: List[int] = Field(default_factory=list)
-    page_reference_groups: List[ChatPageReferenceGroup] = Field(default_factory=list)
-    use_vision: bool = False
-    multimodal_provider: Optional[str] = None
-    multimodal_api_key: Optional[str] = None
-    multimodal_base_url: Optional[str] = None
-    multimodal_model: Optional[str] = None
-    dashscope_api_key: Optional[str] = None
-    vision_model: Optional[str] = None
-
-    @model_validator(mode="after")
-    def apply_multimodal_legacy_aliases(self):
-        if not self.multimodal_provider and self.dashscope_api_key:
-            self.multimodal_provider = "qwen"
-        if not self.multimodal_api_key and self.dashscope_api_key:
-            self.multimodal_api_key = self.dashscope_api_key
-        if not self.multimodal_model and self.vision_model:
-            self.multimodal_model = self.vision_model
+class ChatRequest(BaseModel):
+    """Chat request."""
+
+    document_id: str
+    question: str
+    history: List[dict] = Field(default_factory=list)
+    zhipu_api_key: Optional[str] = None
+    deepseek_api_key: Optional[str] = None
+    mimo_api_key: Optional[str] = None
+    llm_provider: Optional[str] = None
+    allowed_pages: List[int] = Field(default_factory=list)
+    page_reference_groups: List[ChatPageReferenceGroup] = Field(default_factory=list)
+    use_vision: bool = False
+    multimodal_provider: Optional[str] = None
+    multimodal_api_key: Optional[str] = None
+    multimodal_base_url: Optional[str] = None
+    multimodal_model: Optional[str] = None
+    dashscope_api_key: Optional[str] = None
+    vision_model: Optional[str] = None
+
+    @model_validator(mode="after")
+    def apply_multimodal_legacy_aliases(self):
+        if not self.multimodal_provider and self.dashscope_api_key:
+            self.multimodal_provider = "qwen"
+        if not self.multimodal_api_key and self.dashscope_api_key:
+            self.multimodal_api_key = self.dashscope_api_key
+        if not self.multimodal_model and self.vision_model:
+            self.multimodal_model = self.vision_model
         return self
 
 

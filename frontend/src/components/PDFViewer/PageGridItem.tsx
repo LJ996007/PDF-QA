@@ -10,7 +10,7 @@ interface PageGridItemProps {
     active: boolean;
     thumbnailWidth: number;
     onNavigate: (pageNumber: number) => void;
-    onToggleSelect: (pageNumber: number) => void;
+    onToggleSelect: (pageNumber: number, event: React.MouseEvent) => void;
 }
 
 const STATUS_LABEL: Record<PageOcrStatus, string> = {
@@ -42,7 +42,7 @@ export const PageGridItem: React.FC<PageGridItemProps> = ({
                     className={`page-grid-select-toggle ${selected ? 'selected' : ''}`}
                     onClick={(event) => {
                         event.stopPropagation();
-                        onToggleSelect(pageNumber);
+                        onToggleSelect(pageNumber, event);
                     }}
                     aria-pressed={selected}
                     aria-label={`${selected ? '取消选择' : '选择'}第 ${pageNumber} 页`}

@@ -320,6 +320,8 @@ async def chat(request: ChatRequest):
             page_reference_groups=request.page_reference_groups,
             zhipu_api_key=request.zhipu_api_key,
             deepseek_api_key=request.deepseek_api_key,
+            mimo_api_key=request.mimo_api_key,
+            llm_provider=request.llm_provider,
         ):
             if chunk["type"] == "content":
                 assistant_text += chunk["content"]

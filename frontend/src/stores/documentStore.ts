@@ -62,7 +62,16 @@ export interface MultimodalAuditItem {
     status: 'pass' | 'fail' | 'needs_review' | 'error';
     reason: string;
     confidence: number;
-    references: TextChunk[];
+    references: AuditReference[];
+}
+
+export interface AuditReference {
+    page: number;
+    evidence_text: string;
+    bbox: BoundingBox;
+    source: string;
+    ref_id?: string;
+    refId?: string;
 }
 
 export interface MultimodalAuditSummary {
@@ -151,6 +160,8 @@ export interface AppConfig {
     baiduOcrToken: string;
     ocrProvider: 'baidu';
     deepseekApiKey: string;
+    mimoApiKey: string;
+    llmProvider: 'auto' | 'deepseek' | 'zhipu' | 'mimo';
     multimodalProvider: MultimodalProvider;
     multimodalApiKey: string;
     multimodalBaseUrl: string;
@@ -197,6 +208,7 @@ type LegacyTabState = Partial<TabState> & {
 type LegacyMultimodalAuditItem = Partial<MultimodalAuditItem> & {
     check_key?: unknown;
     check_title?: unknown;
+    references?: unknown[];
 };
 
 type LegacyAppConfig = Partial<AppConfig> & {
@@ -220,6 +232,8 @@ const DEFAULT_CONFIG: AppConfig = {
     baiduOcrToken: '',
     ocrProvider: 'baidu',
     deepseekApiKey: '',
+    mimoApiKey: '',
+    llmProvider: 'auto',
     multimodalProvider: 'zhipu',
     multimodalApiKey: '',
     multimodalBaseUrl: getMultimodalDefaults('zhipu').baseUrl,
@@ -424,7 +438,19 @@ const normalizeAuditState = (audit: unknown): MultimodalAuditState => {
                 : 'needs_review',
             reason: String(normalizedItem.reason || ''),
             confidence: Number(normalizedItem.confidence || 0),
-            references: Array.isArray(normalizedItem.references) ? normalizedItem.references : [],
+            references: Array.isArray(normalizedItem.references)
+                ? (normalizedItem.references as unknown[]).map((ref: unknown) => {
+                    const r = (ref || {}) as Record<string, unknown>;
+                    return {
+                        page: Number(r.page || (r.bbox as Record<string, number>)?.page || 1),
+                        evidence_text: String(r.evidence_text || ''),
+                        bbox: (r.bbox || { page: Number(r.page || 1), x: 0, y: 0, w: 100, h: 20 }) as BoundingBox,
+                        source: String(r.source || 'native'),
+                        ref_id: String(r.ref_id || ''),
+                        refId: String(r.refId || r.ref_id || ''),
+                    };
+                })
+                : [],
         };
     });
 

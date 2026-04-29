@@ -26,7 +26,7 @@ MULTIMODAL_PROVIDER_DEFAULTS: Dict[str, Dict[str, str]] = {
     "zhipu": {
         "label": "智谱",
         "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-        "model": "glm-4.6v-flash",
+        "model": "GLM-4.6V-FlashX",
         "base_url_env": "ZHIPU_MULTIMODAL_BASE_URL",
         "model_env": "ZHIPU_MULTIMODAL_MODEL",
         "api_key_env": "ZHIPU_API_KEY",
@@ -34,7 +34,7 @@ MULTIMODAL_PROVIDER_DEFAULTS: Dict[str, Dict[str, str]] = {
     "qwen": {
         "label": "Qwen",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-        "model": "qwen-vl-max-latest",
+        "model": "qwen3.5-flash",
         "base_url_env": "DASHSCOPE_BASE_URL",
         "model_env": "QWEN_VL_MODEL",
         "api_key_env": "DASHSCOPE_API_KEY",
@@ -42,10 +42,18 @@ MULTIMODAL_PROVIDER_DEFAULTS: Dict[str, Dict[str, str]] = {
     "siliconflow": {
         "label": "硅基流动",
         "base_url": "https://api.siliconflow.cn/v1/chat/completions",
-        "model": "Qwen/Qwen2-VL-72B-Instruct",
+        "model": "Qwen/Qwen3.5-9B",
         "base_url_env": "SILICONFLOW_BASE_URL",
         "model_env": "SILICONFLOW_MULTIMODAL_MODEL",
         "api_key_env": "SILICONFLOW_API_KEY",
+    },
+    "mimo": {
+        "label": "MiMo",
+        "base_url": "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions",
+        "model": "mimo-v2.5-pro",
+        "base_url_env": "MIMO_BASE_URL",
+        "model_env": "MIMO_MULTIMODAL_MODEL",
+        "api_key_env": "MIMO_API_KEY",
     },
 }
 
@@ -54,6 +62,8 @@ MULTIMODAL_PROVIDER_ALIASES = {
     "qwen_dashscope": "qwen",
     "silicon-flow": "siliconflow",
     "silicon_flow": "siliconflow",
+    "xiaomi": "mimo",
+    "xiaomi_mimo": "mimo",
 }
 
 

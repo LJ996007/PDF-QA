@@ -1,4 +1,4 @@
-export type MultimodalProvider = 'zhipu' | 'qwen' | 'siliconflow';
+export type MultimodalProvider = 'zhipu' | 'qwen' | 'siliconflow' | 'mimo';
 
 export interface MultimodalProviderDefaults {
     label: string;
@@ -10,17 +10,22 @@ export const MULTIMODAL_PROVIDER_DEFAULTS: Record<MultimodalProvider, Multimodal
     zhipu: {
         label: '智谱',
         baseUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
-        model: 'glm-4.6v-flash',
+        model: 'GLM-4.6V-FlashX',
     },
     qwen: {
         label: 'Qwen',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
-        model: 'qwen-vl-max-latest',
+        model: 'qwen3.5-flash',
     },
     siliconflow: {
         label: '硅基流动',
         baseUrl: 'https://api.siliconflow.cn/v1/chat/completions',
-        model: 'Qwen/Qwen2-VL-72B-Instruct',
+        model: 'Qwen/Qwen3.5-9B',
+    },
+    mimo: {
+        label: 'MiMo',
+        baseUrl: 'https://token-plan-sgp.xiaomimimo.com/v1/chat/completions',
+        model: 'mimo-v2.5-pro',
     },
 };
 
@@ -33,6 +38,9 @@ export const normalizeMultimodalProvider = (value: unknown): MultimodalProvider 
     if (normalized === 'siliconflow' || normalized === 'silicon-flow' || normalized === 'silicon_flow') {
         return 'siliconflow';
     }
+    if (normalized === 'mimo' || normalized === 'xiaomi' || normalized === 'xiaomi_mimo') {
+        return 'mimo';
+    }
     return 'zhipu';
 };
 
@@ -44,6 +52,7 @@ export const resolveEffectiveMultimodalApiKey = (config: {
     multimodalProvider?: unknown;
     multimodalApiKey?: string;
     zhipuApiKey?: string;
+    mimoApiKey?: string;
 }): string => {
     const provider = normalizeMultimodalProvider(config.multimodalProvider);
     const multimodalApiKey = String(config.multimodalApiKey || '').trim();
@@ -52,6 +61,9 @@ export const resolveEffectiveMultimodalApiKey = (config: {
     }
     if (provider === 'zhipu') {
         return String(config.zhipuApiKey || '').trim();
+    }
+    if (provider === 'mimo') {
+        return String(config.mimoApiKey || '').trim();
     }
     return '';
 };
@@ -62,6 +74,7 @@ export const isMultimodalConfigured = (config: {
     multimodalBaseUrl?: string;
     multimodalModel?: string;
     zhipuApiKey?: string;
+    mimoApiKey?: string;
 }): boolean => {
     return Boolean(
         resolveEffectiveMultimodalApiKey(config)
