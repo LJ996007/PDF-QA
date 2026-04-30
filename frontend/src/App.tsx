@@ -27,16 +27,28 @@ const mapPageStatus = (
 const isPdfFilename = (name: string): boolean => name.toLowerCase().endsWith('.pdf');
 const isSupportedUploadFilename = (name: string): boolean => /\.(pdf|doc|docx)$/i.test(name);
 
-const mapBackendDocument = (doc: any, fallbackName = ''): Document => ({
+type BackendDocument = Record<string, unknown>;
+
+const stringArrayOrEmpty = (value: unknown): string[] => (
+  Array.isArray(value) ? value.map((item) => String(item)) : []
+);
+
+const numberArrayOrEmpty = (value: unknown): number[] => (
+  Array.isArray(value)
+    ? value.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item > 0)
+    : []
+);
+
+const mapBackendDocument = (doc: BackendDocument, fallbackName = ''): Document => ({
   id: String(doc?.id || ''),
   name: String(doc?.name || fallbackName || doc?.id || '未命名文档'),
   totalPages: Number(doc?.total_pages || 0),
-  initialOcrRequiredPages: Array.isArray(doc?.initial_ocr_required_pages) ? doc.initial_ocr_required_pages : [],
-  ocrRequiredPages: Array.isArray(doc?.ocr_required_pages) ? doc.ocr_required_pages : [],
-  recognizedPages: Array.isArray(doc?.recognized_pages) ? doc.recognized_pages : [],
-  pageOcrStatus: mapPageStatus(doc?.page_ocr_status),
+  initialOcrRequiredPages: numberArrayOrEmpty(doc?.initial_ocr_required_pages),
+  ocrRequiredPages: numberArrayOrEmpty(doc?.ocr_required_pages),
+  recognizedPages: numberArrayOrEmpty(doc?.recognized_pages),
+  pageOcrStatus: mapPageStatus(doc?.page_ocr_status as Record<string, PageOcrStatus> | undefined),
   ocrMode: doc?.ocr_mode === 'full' ? 'full' : 'manual',
-  thumbnails: Array.isArray(doc?.thumbnails) ? doc.thumbnails : [],
+  thumbnails: stringArrayOrEmpty(doc?.thumbnails),
   sourceFormat: (doc?.source_format || 'pdf') as Document['sourceFormat'],
   convertedFrom: (doc?.converted_from || null) as Document['convertedFrom'],
   conversionStatus: (doc?.conversion_status || 'ok') as Document['conversionStatus'],
@@ -270,9 +282,10 @@ function App() {
   }, [refreshHistory]);
 
   useEffect(() => {
+    const watchers = watchersRef.current;
     return () => {
-      Array.from(watchersRef.current.values()).forEach((stop) => stop());
-      watchersRef.current.clear();
+      Array.from(watchers.values()).forEach((stop) => stop());
+      watchers.clear();
     };
   }, []);
 

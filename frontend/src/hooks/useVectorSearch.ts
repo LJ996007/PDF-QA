@@ -3,8 +3,10 @@ import { resolveEffectiveMultimodalApiKey } from '../constants/multimodal';
 import { appendPageReferenceGroupsToHistoryContent } from '../utils/chatPageReferences';
 import { useDocumentStore } from '../stores/documentStore';
 import type {
+    AuditReference,
     AuditProfile,
     AuditProfileRule,
+    BoundingBox,
     ChatMessage,
     ChatPageReferenceGroup,
     ComplianceItem,
@@ -108,6 +110,19 @@ export interface AuditProfilePayload {
     }>;
 }
 
+export type RecognizePagesResponse = Record<string, unknown> & {
+    pages?: number[];
+    message?: string;
+};
+
+export type DocumentProgressEvent = Record<string, unknown> & {
+    stage?: string;
+    current?: number;
+    total?: number;
+    message?: string;
+    document_id?: string;
+};
+
 const getErrorMessageFromPayload = (payload: unknown): string => {
     if (!payload || typeof payload !== 'object') return '';
 
@@ -174,73 +189,110 @@ const readApiErrorMessage = async (response: Response, fallback: string): Promis
     }
 };
 
-const mapAuditReferenceToChunk = (docId: string, ref: any, index: number): TextChunk => {
-    const page = Number(ref?.page || ref?.bbox?.page || 1);
-    const refId = String(ref?.ref_id || ref?.refId || `ref-${index + 1}`);
-    const bbox = ref?.bbox || { page, x: 0, y: 0, w: 100, h: 20 };
+type UnknownRecord = Record<string, unknown>;
+
+const isRecord = (value: unknown): value is UnknownRecord =>
+    Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const toText = (value: unknown, fallback = ''): string => {
+    if (value === undefined || value === null) return fallback;
+    return String(value);
+};
+
+const toNumber = (value: unknown, fallback = 0): number => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizeBbox = (rawBbox: unknown, page: number): BoundingBox => {
+    const bbox = isRecord(rawBbox) ? rawBbox : {};
+    const bboxPage = toNumber(bbox.page, page);
+    return {
+        page: bboxPage,
+        x: toNumber(bbox.x, 0),
+        y: toNumber(bbox.y, 0),
+        w: toNumber(bbox.w, 100),
+        h: toNumber(bbox.h, 20),
+    };
+};
+
+const mapAuditReference = (docId: string, ref: unknown, index: number): AuditReference => {
+    const raw = isRecord(ref) ? ref : {};
+    const rawBbox = isRecord(raw.bbox) ? raw.bbox : {};
+    const page = toNumber(raw.page || rawBbox.page, 1);
+    const refId = toText(raw.ref_id || raw.refId, `ref-${index + 1}`);
+    const bbox = normalizeBbox(raw.bbox, page);
+    const evidenceText = toText(raw.evidence_text || raw.content);
     return {
         id: `${docId}_${refId}_${index + 1}`,
         refId,
-        content: String(ref?.evidence_text || ref?.content || ''),
+        ref_id: refId,
+        content: evidenceText,
+        evidence_text: evidenceText,
         page,
         bbox,
-        source: ref?.source === 'ocr' ? 'ocr' : 'native',
+        source: toText(raw.source, 'native'),
     };
 };
 
-const mapAuditItem = (docId: string, item: any, idx: number): MultimodalAuditItem => {
-    const refsRaw = Array.isArray(item?.references) ? item.references : [];
+const mapAuditItem = (docId: string, item: unknown, idx: number): MultimodalAuditItem => {
+    const raw = isRecord(item) ? item : {};
+    const refsRaw = Array.isArray(raw.references) ? raw.references : [];
+    const rawStatus = toText(raw.status);
     return {
-        checkKey: String(item?.check_key || item?.checkKey || `check_${idx + 1}`),
-        checkTitle: String(item?.check_title || item?.checkTitle || `检查项 ${idx + 1}`),
-        status: ['pass', 'fail', 'needs_review', 'error'].includes(String(item?.status))
-            ? (item.status as MultimodalAuditItem['status'])
+        checkKey: toText(raw.check_key || raw.checkKey, `check_${idx + 1}`),
+        checkTitle: toText(raw.check_title || raw.checkTitle, `检查项 ${idx + 1}`),
+        status: ['pass', 'fail', 'needs_review', 'error'].includes(rawStatus)
+            ? (rawStatus as MultimodalAuditItem['status'])
             : 'needs_review',
-        reason: String(item?.reason || ''),
-        confidence: Number(item?.confidence || 0),
-        references: refsRaw.map((ref: any, refIdx: number) => mapAuditReferenceToChunk(docId, ref, refIdx)),
+        reason: toText(raw.reason),
+        confidence: toNumber(raw.confidence, 0),
+        references: refsRaw.map((ref, refIdx) => mapAuditReference(docId, ref, refIdx)),
     };
 };
 
-const mapAuditProfileRule = (rule: any, index: number): AuditProfileRule | null => {
-    if (!rule || typeof rule !== 'object') return null;
-    const title = String(rule?.title || '').trim();
-    const instruction = String(rule?.instruction || '').trim();
+const mapAuditProfileRule = (rule: unknown, index: number): AuditProfileRule | null => {
+    if (!isRecord(rule)) return null;
+    const title = toText(rule.title).trim();
+    const instruction = toText(rule.instruction).trim();
     if (!title || !instruction) return null;
     return {
-        id: String(rule?.id || `rule_${index + 1}`),
+        id: toText(rule.id, `rule_${index + 1}`),
         title,
         instruction,
-        enabled: rule?.enabled !== false,
+        enabled: rule.enabled !== false,
     };
 };
 
-const mapAuditProfile = (profile: any): AuditProfile | null => {
-    if (!profile || typeof profile !== 'object') return null;
-    const rulesRaw = Array.isArray(profile?.rules) ? profile.rules : [];
+const mapAuditProfile = (profile: unknown): AuditProfile | null => {
+    if (!isRecord(profile)) return null;
+    const rulesRaw = Array.isArray(profile.rules) ? profile.rules : [];
     const rules = rulesRaw
-        .map((rule: any, index: number) => mapAuditProfileRule(rule, index))
+        .map((rule, index) => mapAuditProfileRule(rule, index))
         .filter((rule: AuditProfileRule | null): rule is AuditProfileRule => Boolean(rule));
-    const id = String(profile?.id || '').trim();
-    const name = String(profile?.name || '').trim();
+    const id = toText(profile.id).trim();
+    const name = toText(profile.name).trim();
     if (!id || !name || rules.length === 0) return null;
     return {
         id,
         name,
-        bidderNameRequired: Boolean(profile?.bidder_name_required ?? profile?.bidderNameRequired),
+        bidderNameRequired: Boolean(profile.bidder_name_required ?? profile.bidderNameRequired),
         rules,
-        createdAt: String(profile?.created_at || profile?.createdAt || ''),
-        updatedAt: String(profile?.updated_at || profile?.updatedAt || ''),
+        createdAt: toText(profile.created_at || profile.createdAt),
+        updatedAt: toText(profile.updated_at || profile.updatedAt),
     };
 };
 
-const mapAuditSummary = (summaryRaw: any, itemCount: number): MultimodalAuditSummary => ({
-    pass: Number(summaryRaw?.pass || 0),
-    fail: Number(summaryRaw?.fail || 0),
-    needs_review: Number(summaryRaw?.needs_review || 0),
-    error: Number(summaryRaw?.error || 0),
-    total: Number(summaryRaw?.total || itemCount),
-});
+const mapAuditSummary = (summaryRaw: unknown, itemCount: number): MultimodalAuditSummary => {
+    const summary = isRecord(summaryRaw) ? summaryRaw : {};
+    return {
+        pass: toNumber(summary.pass, 0),
+        fail: toNumber(summary.fail, 0),
+        needs_review: toNumber(summary.needs_review, 0),
+        error: toNumber(summary.error, 0),
+        total: toNumber(summary.total, itemCount),
+    };
+};
 
 const mapLegacyAuditType = (value: unknown): LegacyAuditType | '' =>
     value === 'contract' || value === 'certificate' || value === 'personnel'
@@ -567,7 +619,7 @@ export function useVectorSearch() {
     );
 
     const recognizePages = useCallback(
-        async (docId: string, pages: number[], apiKey?: string): Promise<any | null> => {
+        async (docId: string, pages: number[], apiKey?: string): Promise<RecognizePagesResponse | null> => {
             try {
                 const resp = await fetch(`${API_BASE}/documents/${docId}/recognize`, {
                     method: 'POST',
@@ -610,35 +662,41 @@ export function useVectorSearch() {
                     throw new Error('获取对话历史失败');
                 }
                 const data = await resp.json();
-                const raw = Array.isArray(data?.messages) ? data.messages : [];
+                const raw: unknown[] = Array.isArray(data?.messages) ? data.messages : [];
 
-                return raw.map((m: any) => {
-                    const ts = m.timestamp ? new Date(m.timestamp) : new Date();
-                    const refs = Array.isArray(m.references) ? m.references : [];
+                return raw.map((entry) => {
+                    const m = isRecord(entry) ? entry : {};
+                    const ts = m.timestamp ? new Date(toText(m.timestamp)) : new Date();
+                    const refs: unknown[] = Array.isArray(m.references) ? m.references : [];
                     const pageReferenceGroups = Array.isArray(m.page_reference_groups)
-                        ? m.page_reference_groups
+                        ? (m.page_reference_groups as ChatPageReferenceGroup[])
                         : Array.isArray(m.pageReferenceGroups)
-                            ? m.pageReferenceGroups
+                            ? (m.pageReferenceGroups as ChatPageReferenceGroup[])
                             : [];
                     const mappedRefs: TextChunk[] = refs
-                        .map((r: any) => ({
-                            id:
-                                r.chunk_id ||
-                                r.chunkId ||
-                                r.id ||
-                                `${docId}_${r.ref_id || r.refId || 'ref'}_${r.page || 0}`,
-                            refId: r.ref_id || r.refId,
-                            content: r.content || '',
-                            page: r.page || 1,
-                            bbox: r.bbox,
+                        .map((ref): TextChunk => {
+                            const r = isRecord(ref) ? ref : {};
+                            const rawBbox = isRecord(r.bbox) ? r.bbox : {};
+                            const page = toNumber(r.page || rawBbox.page, 1);
+                            const refId = toText(r.ref_id || r.refId);
+                            return {
+                            id: toText(
+                                r.chunk_id || r.chunkId || r.id,
+                                `${docId}_${refId || 'ref'}_${page}`
+                            ),
+                            refId,
+                            content: toText(r.content),
+                            page,
+                            bbox: normalizeBbox(r.bbox, page),
                             source: 'native' as const,
-                        }))
-                        .filter((r: any) => !!r.refId);
+                            };
+                        })
+                        .filter((r): r is TextChunk => !!r.refId);
 
                     return {
-                        id: m.id || `${m.role}_${ts.getTime()}`,
-                        role: m.role,
-                        content: m.content || '',
+                        id: toText(m.id, `${toText(m.role, 'assistant')}_${ts.getTime()}`),
+                        role: m.role === 'user' ? 'user' : 'assistant',
+                        content: toText(m.content),
                         references: mappedRefs,
                         pageReferenceGroups,
                         activeRefs: [],
@@ -665,37 +723,40 @@ export function useVectorSearch() {
 
                 const data = await resp.json();
                 const reqs: string[] = Array.isArray(data?.requirements) ? data.requirements : [];
-                const resultsRaw: any[] = Array.isArray(data?.results) ? data.results : [];
+                const resultsRaw: unknown[] = Array.isArray(data?.results) ? data.results : [];
                 const markdown: string = typeof data?.markdown === 'string' ? data.markdown : '';
                 const allowedPagesRaw: number[] = Array.isArray(data?.allowed_pages) ? data.allowed_pages : [];
 
-                const mapped: ComplianceItem[] = resultsRaw.map((item: any, idx: number) => {
-                    const refs = Array.isArray(item?.references) ? item.references : [];
+                const mapped: ComplianceItem[] = resultsRaw.map((entry, idx: number) => {
+                    const item = isRecord(entry) ? entry : {};
+                    const refs: unknown[] = Array.isArray(item.references) ? item.references : [];
                     const mappedRefs: TextChunk[] = refs
-                        .map((r: any) => {
-                            const page = r?.page_number || r?.page || r?.bbox?.page || 1;
-                            const refId = r?.ref_id || r?.refId;
-                            const bbox = r?.bbox || { page, x: 0, y: 0, w: 100, h: 20 };
+                        .map((ref) => {
+                            const r = isRecord(ref) ? ref : {};
+                            const rawBbox = isRecord(r.bbox) ? r.bbox : {};
+                            const page = toNumber(r.page_number || r.page || rawBbox.page, 1);
+                            const refId = toText(r.ref_id || r.refId);
                             return {
-                                id:
-                                    r?.id ||
-                                    r?.chunk_id ||
-                                    r?.chunkId ||
-                                    `${docId}_${refId || 'ref'}_${page}`,
+                                id: toText(
+                                    r.id || r.chunk_id || r.chunkId,
+                                    `${docId}_${refId || 'ref'}_${page}`
+                                ),
                                 refId,
-                                content: r?.content || '',
+                                content: toText(r.content),
                                 page,
-                                bbox,
-                                source: (r?.source_type === 'ocr' ? 'ocr' : 'native') as 'native' | 'ocr',
+                                bbox: normalizeBbox(r.bbox, page),
+                                source: (r.source_type === 'ocr' ? 'ocr' : 'native') as 'native' | 'ocr',
                             } as TextChunk;
                         })
-                        .filter((r: any) => !!r.refId);
+                        .filter((r): r is TextChunk => !!r.refId);
 
                     return {
-                        id: item?.id || idx + 1,
-                        requirement: item?.requirement || '',
-                        status: item?.status || 'unknown',
-                        response: item?.response || '',
+                        id: toNumber(item.id, idx + 1),
+                        requirement: toText(item.requirement),
+                        status: ['satisfied', 'unsatisfied', 'partial', 'unknown', 'error'].includes(toText(item.status))
+                            ? (toText(item.status) as ComplianceItem['status'])
+                            : 'unknown',
+                        response: toText(item.response),
                         references: mappedRefs,
                     } as ComplianceItem;
                 });
@@ -720,9 +781,9 @@ export function useVectorSearch() {
                 throw new Error(await readApiErrorMessage(resp, '加载审核模板失败'));
             }
             const data = await resp.json();
-            const profilesRaw = Array.isArray(data) ? data : [];
+            const profilesRaw: unknown[] = Array.isArray(data) ? data : [];
             return profilesRaw
-                .map((profile: any) => mapAuditProfile(profile))
+                .map((profile) => mapAuditProfile(profile))
                 .filter((profile: AuditProfile | null): profile is AuditProfile => Boolean(profile));
         } catch (error) {
             console.error('加载审核模板错误:', error);
@@ -863,8 +924,8 @@ export function useVectorSearch() {
                 const resp = await fetch(`${API_BASE}/documents/${docId}/multimodal_audit/jobs/${jobId}`);
                 if (!resp.ok) throw new Error('获取专项审查结果失败');
                 const data = await resp.json();
-                const itemsRaw = Array.isArray(data?.items) ? data.items : [];
-                const mappedItems = itemsRaw.map((item: any, idx: number) => mapAuditItem(docId, item, idx));
+                const itemsRaw: unknown[] = Array.isArray(data?.items) ? data.items : [];
+                const mappedItems = itemsRaw.map((item, idx: number) => mapAuditItem(docId, item, idx));
                 const summary = mapAuditSummary(data?.summary || {}, mappedItems.length);
                 const auditProfileSnapshot = mapAuditProfile(data?.audit_profile_snapshot);
                 const legacyAuditType = mapLegacyAuditType(data?.audit_type);
@@ -902,19 +963,20 @@ export function useVectorSearch() {
                 const jobs = Array.isArray(data?.jobs) ? data.jobs : [];
                 if (jobs.length === 0) return null;
                 const latest = jobs[0];
-                const itemsRaw = Array.isArray(latest?.items) ? latest.items : [];
-                const mappedItems = itemsRaw.map((item: any, idx: number) => mapAuditItem(docId, item, idx));
-                const summary = mapAuditSummary(latest?.summary || {}, mappedItems.length);
-                const auditProfileSnapshot = mapAuditProfile(latest?.audit_profile_snapshot);
-                const legacyAuditType = mapLegacyAuditType(latest?.audit_type);
+                const latestRecord = isRecord(latest) ? latest : {};
+                const itemsRaw: unknown[] = Array.isArray(latestRecord.items) ? latestRecord.items : [];
+                const mappedItems = itemsRaw.map((item, idx: number) => mapAuditItem(docId, item, idx));
+                const summary = mapAuditSummary(latestRecord.summary || {}, mappedItems.length);
+                const auditProfileSnapshot = mapAuditProfile(latestRecord.audit_profile_snapshot);
+                const legacyAuditType = mapLegacyAuditType(latestRecord.audit_type);
                 return {
-                    jobId: String(latest?.job_id || ''),
-                    status: ['queued', 'running', 'completed', 'failed'].includes(String(latest?.status))
-                        ? (latest.status as MultimodalAuditJobResult['status'])
+                    jobId: toText(latestRecord.job_id),
+                    status: ['queued', 'running', 'completed', 'failed'].includes(toText(latestRecord.status))
+                        ? (toText(latestRecord.status) as MultimodalAuditJobResult['status'])
                         : 'completed',
-                    generatedAt: String(latest?.generated_at || latest?.finished_at || ''),
-                    auditProfileId: String(latest?.audit_profile_id || auditProfileSnapshot?.id || legacyAuditType || ''),
-                    auditProfileName: String(latest?.audit_profile_name || auditProfileSnapshot?.name || ''),
+                    generatedAt: toText(latestRecord.generated_at || latestRecord.finished_at),
+                    auditProfileId: toText(latestRecord.audit_profile_id || auditProfileSnapshot?.id || legacyAuditType),
+                    auditProfileName: toText(latestRecord.audit_profile_name || auditProfileSnapshot?.name),
                     auditProfileSnapshot,
                     legacyAuditType,
                     items: mappedItems,
@@ -929,7 +991,7 @@ export function useVectorSearch() {
     );
 
     const watchProgress = useCallback(
-        (docId: string, onProgress: (progress: any) => void): (() => void) => {
+        (docId: string, onProgress: (progress: DocumentProgressEvent) => void): (() => void) => {
             const eventSource = new EventSource(`${API_BASE}/documents/${docId}/progress`);
 
             eventSource.addEventListener('progress', (event) => {

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { isMultimodalConfigured, resolveEffectiveMultimodalApiKey } from '../../constants/multimodal';
 import { useDocumentStore } from '../../stores/documentStore';
-import type { AuditProfile, AuditReference, MultimodalAuditItem } from '../../stores/documentStore';
+import type { AuditProfile, MultimodalAuditItem } from '../../stores/documentStore';
 import type { AuditProfilePayload } from '../../hooks/useVectorSearch';
 import { useVectorSearch } from '../../hooks/useVectorSearch';
 import './MultimodalAuditPanel.css';
@@ -178,17 +178,26 @@ export const MultimodalAuditPanel: React.FC = () => {
             const ref = item.references.find((r) => r.refId === refId || r.ref_id === refId);
             if (!ref) continue;
             const page = Number(ref.page || ref.bbox?.page || 1);
+            const evidenceText = ref.evidence_text || ref.content || '';
             setHighlights([{
                 id: `${currentDocument?.id || 'doc'}_${refId}_${page}`,
                 refId,
+                content: evidenceText,
                 page,
                 bbox: ref.bbox || { page, x: 0, y: 0, w: 100, h: 20 },
-                source: (ref.source || 'native') as 'native' | 'ocr',
+                source: ref.source === 'ocr' ? 'ocr' : 'native',
             }]);
             setCurrentPage(page);
             return;
         }
     };
+
+    useEffect(() => {
+        if (audit.progress?.stage !== 'completed' || audit.items.length === 0) {
+            return;
+        }
+        setExpandedKeys(new Set(audit.items.map((item) => item.checkKey)));
+    }, [audit.generatedAt, audit.lastJobId, audit.items, audit.progress?.stage]);
 
     const renderReason = (reason: string) => {
         const parts = reason.split(REF_PATTERN);
@@ -208,6 +217,163 @@ export const MultimodalAuditPanel: React.FC = () => {
             }
             return <React.Fragment key={idx}>{part}</React.Fragment>;
         });
+    };
+
+    const renderAuditResults = () => {
+        const hasCompletedEmptyResult = audit.progress?.stage === 'completed' && audit.summary.total > 0 && audit.items.length === 0;
+
+        return (
+            <section ref={resultsRef} className="audit-results-panel">
+                <div className="audit-results-header">
+                    <div>
+                        <span className="audit-section-kicker">审核结果</span>
+                        <h3>专项审查明细</h3>
+                    </div>
+                    {audit.items.length > 0 && (
+                        <button
+                            type="button"
+                            className="audit-secondary-btn"
+                            onClick={() => {
+                                if (expandedKeys.size === audit.items.length) {
+                                    setExpandedKeys(new Set());
+                                } else {
+                                    setExpandedKeys(new Set(audit.items.map((item) => item.checkKey)));
+                                }
+                            }}
+                        >
+                            {expandedKeys.size === audit.items.length ? '折叠全部' : '展开全部'}
+                        </button>
+                    )}
+                </div>
+
+                <div className="audit-summary">
+                    <span className="status-pass">通过: {audit.summary.pass}</span>
+                    <span className="status-fail">不通过: {audit.summary.fail}</span>
+                    <span className="status-review">需复核: {audit.summary.needs_review}</span>
+                    <span className="status-error">错误: {audit.summary.error}</span>
+                    <span>总数: {audit.summary.total}</span>
+                </div>
+
+                {audit.items.length === 0 ? (
+                    <div className={`audit-empty ${hasCompletedEmptyResult ? 'audit-empty--warning' : ''}`}>
+                        <span>
+                            {hasCompletedEmptyResult
+                                ? '审核任务已完成，但本地还没有拿到明细结果。'
+                                : '暂无专项审核结果'}
+                        </span>
+                        {audit.lastJobId && audit.progress?.stage === 'completed' && (
+                            <button
+                                type="button"
+                                className="audit-secondary-btn"
+                                onClick={async () => {
+                                    if (!currentDocument || !audit.lastJobId) return;
+                                    const result = await getMultimodalAuditJobResult(currentDocument.id, audit.lastJobId);
+                                    if (result) {
+                                        setAuditState({
+                                            items: result.items,
+                                            summary: result.summary,
+                                            generatedAt: result.generatedAt,
+                                            lastAuditProfileId: result.auditProfileId || audit.lastAuditProfileId,
+                                            lastAuditProfileName: result.auditProfileName || audit.lastAuditProfileName,
+                                            lastAuditProfileSnapshot: result.auditProfileSnapshot || audit.lastAuditProfileSnapshot,
+                                            legacyAuditType: result.legacyAuditType,
+                                        });
+                                        setTimeout(() => {
+                                            resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                        }, 100);
+                                    } else {
+                                        window.alert('未能获取到审核结果，请重新运行审核。');
+                                    }
+                                }}
+                            >
+                                重新获取结果
+                            </button>
+                        )}
+                    </div>
+                ) : (
+                    <div className="audit-result-list">
+                        {audit.items.map((item, index) => {
+                            const isExpanded = expandedKeys.has(item.checkKey);
+                            const confidence = Math.round((item.confidence || 0) * 100);
+                            return (
+                                <article key={item.checkKey} className={`audit-result-card ${isExpanded ? 'is-expanded' : ''}`}>
+                                    <button
+                                        type="button"
+                                        className="audit-result-card-main"
+                                        onClick={() => {
+                                            setExpandedKeys((prev) => {
+                                                const next = new Set(prev);
+                                                if (next.has(item.checkKey)) {
+                                                    next.delete(item.checkKey);
+                                                } else {
+                                                    next.add(item.checkKey);
+                                                }
+                                                return next;
+                                            });
+                                        }}
+                                    >
+                                        <span className="audit-result-index">{index + 1}</span>
+                                        <span className="audit-result-title">{item.checkTitle}</span>
+                                        <span className={`audit-status ${statusClass(item.status)}`}>{statusLabel(item.status)}</span>
+                                        <span className="audit-confidence">置信度 {confidence}%</span>
+                                        <span className="audit-card-chevron">{isExpanded ? '收起' : '展开'}</span>
+                                    </button>
+
+                                    <div className="audit-result-reason">
+                                        {renderReason(item.reason || '模型未提供说明。')}
+                                    </div>
+
+                                    {isExpanded && (
+                                        <div className="audit-detail">
+                                            <div className="audit-detail-section">
+                                                <h4>分析结论</h4>
+                                                <p>{renderReason(item.reason || '模型未提供说明。')}</p>
+                                            </div>
+
+                                            <div className="audit-detail-section">
+                                                <h4>证据定位</h4>
+                                                {item.references.length > 0 ? (
+                                                    <div className="audit-evidence-list">
+                                                        {item.references.map((ref, refIdx) => {
+                                                            const evidenceText = ref.evidence_text || ref.content || '';
+                                                            const refId = ref.refId || ref.ref_id || `ref-${refIdx + 1}`;
+                                                            return (
+                                                                <div key={`${refId}_${refIdx}`} className="audit-evidence-card">
+                                                                    <div className="audit-evidence-header">
+                                                                        <button
+                                                                            type="button"
+                                                                            className="audit-ref-btn"
+                                                                            onClick={() => handleRefClick(refId)}
+                                                                        >
+                                                                            {refId}
+                                                                        </button>
+                                                                        <span className="audit-evidence-page">第 {ref.page} 页</span>
+                                                                        <span className="audit-evidence-source">{ref.source || 'native'}</span>
+                                                                    </div>
+                                                                    {evidenceText ? (
+                                                                        <blockquote className="audit-evidence-text">
+                                                                            {evidenceText}
+                                                                        </blockquote>
+                                                                    ) : (
+                                                                        <p className="audit-no-evidence">该证据没有返回可展示的原文。</p>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                ) : (
+                                                    <p className="audit-no-evidence">未找到可直接定位的证据，建议人工复核原文页。</p>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </article>
+                            );
+                        })}
+                    </div>
+                )}
+            </section>
+        );
     };
 
     const validateDraft = (profile: AuditProfile | null): string => {
@@ -486,6 +652,40 @@ export const MultimodalAuditPanel: React.FC = () => {
                 </div>
             </div>
 
+            {(profilesLoading || profileError || isDraftDirty) && (
+                <div className={`audit-profile-banner ${profileError ? 'error' : isDraftDirty ? 'warning' : ''}`}>
+                    {profilesLoading
+                        ? '正在加载审核模板...'
+                        : profileError
+                            ? profileError
+                            : '当前模板有未保存的修改，保存后才会用于后续专项审核。'}
+                </div>
+            )}
+
+            {(audit.lastAuditProfileName || audit.generatedAt) && (
+                <div className="audit-meta-banner">
+                    {audit.lastAuditProfileName ? `最近结果模板：${audit.lastAuditProfileName}` : '最近结果模板：未记录'}
+                    {audit.generatedAt ? ` ｜ 生成时间：${new Date(audit.generatedAt).toLocaleString()}` : ''}
+                </div>
+            )}
+
+            {audit.progress && (
+                <div className="audit-progress">
+                    <div className="audit-progress-meta">
+                        <span>{audit.progress.message || '处理中...'}</span>
+                        <span>{audit.progress.current}/{audit.progress.total}</span>
+                    </div>
+                    <div className="audit-progress-track">
+                        <div
+                            className="audit-progress-bar"
+                            style={{ width: `${Math.max(0, Math.min(100, (audit.progress.current / Math.max(1, audit.progress.total)) * 100))}%` }}
+                        />
+                    </div>
+                </div>
+            )}
+
+            {renderAuditResults()}
+
             <div className="audit-form">
                 <label className="audit-field">
                     <span>模板名称</span>
@@ -604,184 +804,6 @@ export const MultimodalAuditPanel: React.FC = () => {
                     </div>
                 </div>
 
-            </div>
-
-            {(profilesLoading || profileError || isDraftDirty) && (
-                <div className={`audit-profile-banner ${profileError ? 'error' : isDraftDirty ? 'warning' : ''}`}>
-                    {profilesLoading
-                        ? '正在加载审核模板...'
-                        : profileError
-                            ? profileError
-                            : '当前模板有未保存的修改，保存后才会用于后续专项审核。'}
-                </div>
-            )}
-
-            {(audit.lastAuditProfileName || audit.generatedAt) && (
-                <div className="audit-meta-banner">
-                    {audit.lastAuditProfileName ? `最近结果模板：${audit.lastAuditProfileName}` : '最近结果模板：未记录'}
-                    {audit.generatedAt ? ` ｜ 生成时间：${new Date(audit.generatedAt).toLocaleString()}` : ''}
-                </div>
-            )}
-
-            {audit.progress && (
-                <div className="audit-progress">
-                    <div className="audit-progress-meta">
-                        <span>{audit.progress.message || '处理中...'}</span>
-                        <span>{audit.progress.current}/{audit.progress.total}</span>
-                    </div>
-                    <div className="audit-progress-track">
-                        <div
-                            className="audit-progress-bar"
-                            style={{ width: `${Math.max(0, Math.min(100, (audit.progress.current / Math.max(1, audit.progress.total)) * 100))}%` }}
-                        />
-                    </div>
-                </div>
-            )}
-
-            <div ref={resultsRef} className="audit-summary">
-                <span>通过: {audit.summary.pass}</span>
-                <span>不通过: {audit.summary.fail}</span>
-                <span>需复核: {audit.summary.needs_review}</span>
-                <span>错误: {audit.summary.error}</span>
-                <span>总数: {audit.summary.total}</span>
-            </div>
-
-            <div className="audit-results">
-                {audit.items.length === 0 ? (
-                    <div className="audit-empty">
-                        <span>暂无专项审核结果</span>
-                        {audit.lastJobId && audit.progress?.stage === 'completed' && (
-                            <button
-                                type="button"
-                                className="audit-secondary-btn"
-                                style={{ marginTop: 8 }}
-                                onClick={async () => {
-                                    if (!currentDocument || !audit.lastJobId) return;
-                                    const result = await getMultimodalAuditJobResult(currentDocument.id, audit.lastJobId);
-                                    if (result) {
-                                        setAuditState({
-                                            items: result.items,
-                                            summary: result.summary,
-                                            generatedAt: result.generatedAt,
-                                        });
-                                        setTimeout(() => {
-                                            resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                        }, 100);
-                                    } else {
-                                        window.alert('未能获取到审核结果，请重新运行审核。');
-                                    }
-                                }}
-                            >
-                                重新获取结果
-                            </button>
-                        )}
-                    </div>
-                ) : (
-                    <>
-                        <div className="audit-results-toolbar">
-                            <button
-                                type="button"
-                                className="audit-secondary-btn"
-                                onClick={() => {
-                                    if (expandedKeys.size === audit.items.length) {
-                                        setExpandedKeys(new Set());
-                                    } else {
-                                        setExpandedKeys(new Set(audit.items.map((item) => item.checkKey)));
-                                    }
-                                }}
-                            >
-                                {expandedKeys.size === audit.items.length ? '折叠全部' : '展开全部'}
-                            </button>
-                        </div>
-                        <table className="audit-table">
-                            <thead>
-                                <tr>
-                                    <th style={{ width: 36 }}></th>
-                                    <th>检查项</th>
-                                    <th>状态</th>
-                                    <th>说明</th>
-                                    <th>置信度</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {audit.items.map((item) => {
-                                    const isExpanded = expandedKeys.has(item.checkKey);
-                                    const reasonSummary = item.reason.length > 60
-                                        ? item.reason.slice(0, 60) + '...'
-                                        : item.reason;
-                                    return (
-                                        <React.Fragment key={item.checkKey}>
-                                            <tr className={`audit-row ${isExpanded ? 'audit-row--expanded' : ''}`}>
-                                                <td>
-                                                    <button
-                                                        type="button"
-                                                        className="audit-expand-btn"
-                                                        onClick={() => {
-                                                            setExpandedKeys((prev) => {
-                                                                const next = new Set(prev);
-                                                                if (next.has(item.checkKey)) {
-                                                                    next.delete(item.checkKey);
-                                                                } else {
-                                                                    next.add(item.checkKey);
-                                                                }
-                                                                return next;
-                                                            });
-                                                        }}
-                                                        title={isExpanded ? '折叠详情' : '展开详情'}
-                                                    >
-                                                        {isExpanded ? '▾' : '▸'}
-                                                    </button>
-                                                </td>
-                                                <td className="audit-cell-title">{item.checkTitle}</td>
-                                                <td><span className={`audit-status ${statusClass(item.status)}`}>{statusLabel(item.status)}</span></td>
-                                                <td className="audit-cell-reason">{isExpanded ? renderReason(item.reason) : renderReason(reasonSummary)}</td>
-                                                <td>{Math.round((item.confidence || 0) * 100)}%</td>
-                                            </tr>
-                                            {isExpanded && (
-                                                <tr className="audit-detail-row">
-                                                    <td colSpan={5}>
-                                                        <div className="audit-detail">
-                                                            <div className="audit-detail-section">
-                                                                <h4>详细说明</h4>
-                                                                <p>{renderReason(item.reason)}</p>
-                                                            </div>
-                                                            {item.references.length > 0 && (
-                                                                <div className="audit-detail-section">
-                                                                    <h4>证据原文</h4>
-                                                                    {item.references.map((ref, refIdx) => (
-                                                                        <div key={refIdx} className="audit-evidence-card">
-                                                                            <div className="audit-evidence-header">
-                                                                                <button
-                                                                                    className="audit-ref-btn"
-                                                                                    onClick={() => {
-                                                                                        const refId = ref.refId || ref.ref_id || '';
-                                                                                        if (refId) handleRefClick(refId);
-                                                                                    }}
-                                                                                >
-                                                                                    {ref.refId || ref.ref_id || `ref-${refIdx + 1}`}
-                                                                                </button>
-                                                                                <span className="audit-evidence-page">第 {ref.page} 页</span>
-                                                                            </div>
-                                                                            {ref.evidence_text && (
-                                                                                <blockquote className="audit-evidence-text">
-                                                                                    {ref.evidence_text}
-                                                                                </blockquote>
-                                                                            )}
-                                                                        </div>
-                                                                    ))}
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            )}
-                                        </React.Fragment>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
-                    </>
-                )}
             </div>
         </div>
     );

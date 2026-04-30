@@ -66,6 +66,8 @@ export interface MultimodalAuditItem {
 }
 
 export interface AuditReference {
+    id?: string;
+    content?: string;
     page: number;
     evidence_text: string;
     bbox: BoundingBox;

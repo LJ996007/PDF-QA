@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
     MULTIMODAL_PROVIDER_DEFAULTS,
     getMultimodalDefaults,
     type MultimodalProvider,
 } from '../../constants/multimodal';
 import { useDocumentStore } from '../../stores/documentStore';
+import type { AppConfig } from '../../stores/documentStore';
 import './Settings.css';
 
 interface SettingsProps {
@@ -15,6 +16,25 @@ interface SettingsProps {
 export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
     const { config, updateConfig } = useDocumentStore();
 
+    if (!isOpen) return null;
+
+    return (
+        <SettingsModal
+            key={`${config.llmProvider}_${config.multimodalProvider}_${config.multimodalModel}_${config.baiduOcrUrl}`}
+            config={config}
+            updateConfig={updateConfig}
+            onClose={onClose}
+        />
+    );
+};
+
+interface SettingsModalProps {
+    config: AppConfig;
+    updateConfig: (config: Partial<AppConfig>) => void;
+    onClose: () => void;
+}
+
+const SettingsModal: React.FC<SettingsModalProps> = ({ config, updateConfig, onClose }) => {
     const [zhipuKey, setZhipuKey] = useState(config.zhipuApiKey);
     const [deepseekKey, setDeepseekKey] = useState(config.deepseekApiKey);
     const [mimoKey, setMimoKey] = useState(config.mimoApiKey || '');
@@ -31,20 +51,6 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
     const [isTextLlmExpanded, setIsTextLlmExpanded] = useState(true);
     const [isOcrExpanded, setIsOcrExpanded] = useState(false);
     const [isMultimodalExpanded, setIsMultimodalExpanded] = useState(true);
-
-    useEffect(() => {
-        if (!isOpen) return;
-        setZhipuKey(config.zhipuApiKey);
-        setDeepseekKey(config.deepseekApiKey);
-        setMimoKey(config.mimoApiKey || '');
-        setLlmProvider(config.llmProvider || 'auto');
-        setMultimodalProvider(config.multimodalProvider);
-        setMultimodalApiKey(config.multimodalApiKey || '');
-        setMultimodalBaseUrl(config.multimodalBaseUrl || getMultimodalDefaults(config.multimodalProvider).baseUrl);
-        setMultimodalModel(config.multimodalModel || getMultimodalDefaults(config.multimodalProvider).model);
-        setBaiduOcrUrl(config.baiduOcrUrl || '');
-        setBaiduOcrToken(config.baiduOcrToken || '');
-    }, [config, isOpen]);
 
     const applyProviderTemplate = (provider: MultimodalProvider) => {
         const defaults = getMultimodalDefaults(provider);
@@ -69,8 +75,6 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
         });
         onClose();
     };
-
-    if (!isOpen) return null;
 
     return (
         <div className="settings-overlay" onClick={onClose}>
